@@ -62,7 +62,8 @@ List prices, September 2026. At about 140 words per minute, **10,000 words is ab
 - Keyterms must be under 50 characters, at most 5 words, and contain none of `< > { } [ ] \`. Invalid entries are only sent to the polish model.
   With more than 100 keyterms, ElevenLabs bills every request at least 20 seconds.
 - `uiohook-napi` can observe keys but not block them, so the hotkey also reaches the focused app.
-  Ctrl+Win does nothing on its own in Windows. The Start menu is kept from opening by tapping F24 (`hotkey.suppressStartMenu`).
+  The app never injects keys while the hotkey is held, because Ctrl+Win+<key> combinations can trigger Windows shortcuts
+  (for example, Ctrl+Win+F24 toggles the touchpad).
 - Windows won't let a normal process send keystrokes into elevated (admin) windows. Run the terminal as administrator if you need to dictate into those.
 - `pnpm test:smoke` checks sounds, the microphone and the hotkey state machine (using injected F13/F14/F15 keys).
   `pnpm test:e2e` runs the whole pipeline against a local mock API.

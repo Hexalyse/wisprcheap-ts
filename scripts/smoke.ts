@@ -38,7 +38,6 @@ const ptt = new PushToTalk({
   tapMaxMs: 250,
   doubleTapWindowMs: 350,
   cancelOnOtherKey: true,
-  suppressStartMenu: true,
 });
 const events: string[] = [];
 ptt.on('start', () => events.push('start'));

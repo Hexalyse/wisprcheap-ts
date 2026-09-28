@@ -31,8 +31,6 @@ const schema = z.object({
       doubleTapWindowMs: z.number().int().positive().default(350),
       /** Cancel the recording if another key is pressed while holding (e.g. Ctrl+Win+Left). */
       cancelOnOtherKey: z.boolean().default(true),
-      /** Inject a harmless F24 tap so releasing Win doesn't open the Start menu. */
-      suppressStartMenu: z.boolean().default(true),
     })
     .prefault({}),
 

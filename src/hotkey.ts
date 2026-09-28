@@ -2,8 +2,8 @@ import { EventEmitter } from 'node:events';
 import { uIOhook, UiohookKey, type UiohookKeyboardEvent } from 'uiohook-napi';
 import type { Config } from './config.ts';
 
-/** Harmless key tapped while Win is held so its release doesn't open the Start menu. */
-const MASK_KEY = UiohookKey.F24;
+// Never inject keys while the hotkey is held: any key combined with Ctrl+Win can trigger a Windows
+// shortcut (e.g. Ctrl+Win+F24 toggles the touchpad).
 
 const ALIASES: Record<string, number[]> = {
   ctrl: [UiohookKey.Ctrl, UiohookKey.CtrlRight],
@@ -114,7 +114,6 @@ export class PushToTalk extends EventEmitter<PushToTalkEvents> {
   }
 
   #onKeyDown(e: UiohookKeyboardEvent): void {
-    if (e.keycode === MASK_KEY) return;
     if (this.#pressed.has(e.keycode)) return; // auto-repeat
     const wasHeld = this.#comboHeld();
     this.#pressed.add(e.keycode);
@@ -132,17 +131,12 @@ export class PushToTalk extends EventEmitter<PushToTalkEvents> {
   }
 
   #onKeyUp(e: UiohookKeyboardEvent): void {
-    if (e.keycode === MASK_KEY) return;
     const wasHeld = this.#comboHeld();
     this.#pressed.delete(e.keycode);
     if (wasHeld && !this.#comboHeld()) this.#onComboUp();
   }
 
   #onComboDown(): void {
-    if (this.#opts.suppressStartMenu && this.isWinDown()) {
-      this.markInjection();
-      uIOhook.keyTap(MASK_KEY);
-    }
     switch (this.#state) {
       case 'idle':
         this.#state = 'holding';

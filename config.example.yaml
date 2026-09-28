@@ -11,8 +11,6 @@ hotkey:
   doubleTapWindowMs: 350
   # Pressing any other key while holding cancels the recording, so Ctrl+Win+Left/Right/D still work normally.
   cancelOnOtherKey: true
-  # Taps F24 while Win is held so releasing Win doesn't open the Start menu.
-  suppressStartMenu: true
 
 recording:
   device: default          # "default", an index or part of a name (see `pnpm devices`)
