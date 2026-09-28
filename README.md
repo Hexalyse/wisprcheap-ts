@@ -88,3 +88,7 @@ List prices, September 2026. At about 140 words per minute, **10,000 words is ab
 - The desktop shortcut runs `scripts/launch-hidden.wsf` through `wscript.exe` so that no console window appears.
 - `pnpm test:smoke` checks sounds, the microphone and the hotkey state machine (using injected F13/F14/F15 keys).
   `pnpm test:e2e` runs the whole pipeline against a local mock API.
+
+## License
+
+[MIT](LICENSE)
