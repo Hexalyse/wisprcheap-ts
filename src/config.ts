@@ -159,6 +159,16 @@ function resolveConfigPath(argv: string[]): string | null {
   return existsSync(defaultPath) ? defaultPath : null;
 }
 
+/** Directory of the config file in use (or the project root), without loading it. Never throws. */
+export function resolveBaseDir(argv: string[] = process.argv.slice(2)): string {
+  try {
+    const configPath = resolveConfigPath(argv);
+    return configPath ? path.dirname(configPath) : PROJECT_ROOT;
+  } catch {
+    return PROJECT_ROOT;
+  }
+}
+
 export function loadConfig(argv: string[] = process.argv.slice(2)): LoadedConfig {
   const configPath = resolveConfigPath(argv);
   const baseDir = configPath ? path.dirname(configPath) : PROJECT_ROOT;

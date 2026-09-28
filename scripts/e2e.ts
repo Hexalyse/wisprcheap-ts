@@ -66,7 +66,11 @@ sounds:
 `);
 writeFileSync(path.join(dir, '.env'), 'TEST_XI_KEY=xi-from-dotenv\n');
 
-const app = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'src/main.ts', '--config', configFile], { stdio: ['ignore', 'pipe', 'pipe'] });
+// --no-tray and a separate instance name, so this can run next to a real wisprcheap.
+const app = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'src/main.ts', '--config', configFile, '--no-tray'], {
+  stdio: ['ignore', 'pipe', 'pipe'],
+  env: { ...process.env, WISPRCHEAP_INSTANCE: 'e2e' },
+});
 let output = '';
 app.stdout.on('data', (d) => (output += d));
 app.stderr.on('data', (d) => (output += d));
@@ -76,7 +80,7 @@ const waitForOutput = async (text: string, timeoutMs: number) => {
   return output.includes(text);
 };
 if (!(await waitForOutput('Press Ctrl+C', 15_000))) console.log('App did not start in time');
-await sleep(300);
+await sleep(1000); // give the keyboard hook time to come up
 
 uIOhook.keyToggle(UiohookKey.F13, 'down');
 await sleep(1200);

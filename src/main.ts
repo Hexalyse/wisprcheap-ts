@@ -1,27 +1,93 @@
+import { spawn } from 'node:child_process';
+import { copyFileSync, existsSync } from 'node:fs';
+import type net from 'node:net';
+import path from 'node:path';
+import clipboard from 'clipboardy';
 import { loudestWindowDb, pcmDurationMs } from './audio.ts';
-import { loadConfig } from './config.ts';
+import { loadConfig, PROJECT_ROOT, resolveBaseDir } from './config.ts';
 import { PushToTalk } from './hotkey.ts';
 import { countWords, History, type HistoryEntry } from './history.ts';
+import { writeIcons } from './icons.ts';
+import { acquireInstance, AlreadyRunningError } from './instance.ts';
+import { addLogSink, logFilePath, setupLogging } from './log.ts';
 import { deliver } from './output.ts';
 import { Polisher } from './polish.ts';
 import { llmCost, transcriptionCost } from './pricing.ts';
 import { Recorder, resolveDeviceIndex } from './recorder.ts';
 import { Sounds } from './sounds.ts';
 import { createTranscriber } from './transcribe.ts';
+import { Tray } from './tray.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const time = () => new Date().toLocaleTimeString();
 const log = (...args: unknown[]) => console.log(`[${time()}]`, ...args);
 const logError = (...args: unknown[]) => console.error(`[${time()}]`, ...args);
 
+/** --no-tray: run without the tray icon (tests). --restarted: spawned by "Restart", wait for the old instance. */
+const argv = process.argv.slice(2);
+const useTray = !argv.includes('--no-tray');
+
+setupLogging(logFilePath(resolveBaseDir(argv)));
+process.on('uncaughtException', (error) => {
+  console.error('Fatal error:', error);
+  process.exit(1);
+});
+
+// ---------------------------------------------------------------------------
+// Single instance (also how `pnpm start` / `pnpm stop` / the shortcut reach the running app)
+// ---------------------------------------------------------------------------
+
+let ready = false;
+let tray: Tray | null = null;
+
+function handleCommand(command: string): string {
+  switch (command) {
+    case 'ping':
+      return ready ? 'pong' : 'starting';
+    case 'quit':
+      setImmediate(() => void quit());
+      return 'ok';
+    case 'restart':
+      setImmediate(() => void restart());
+      return 'ok';
+    case 'show-log':
+      tray?.showLog();
+      return tray ? 'ok' : 'no-tray';
+    default:
+      return 'unknown-command';
+  }
+}
+
+let instance: net.Server;
+try {
+  instance = await acquireInstance(handleCommand, argv.includes('--restarted') ? 10_000 : 0);
+} catch (error) {
+  if (!(error instanceof AlreadyRunningError)) throw error;
+  console.error('wisprcheap is already running (see the tray icon). Quit it from the tray or with `pnpm stop` first.');
+  process.exit(1);
+}
+
 let loaded: ReturnType<typeof loadConfig>;
 try {
-  loaded = loadConfig();
+  loaded = loadConfig(argv);
 } catch (error) {
   console.error((error as Error).message);
   process.exit(1);
 }
 const { config, configPath, baseDir, dictionary } = loaded;
+
+if (useTray) {
+  tray = new Tray();
+  addLogSink((line) => tray?.log(line));
+  tray.on('exit', (code, stderr) => {
+    tray = null;
+    console.warn(
+      `[tray] The tray icon stopped (exit code ${code})${stderr ? `:\n${stderr}` : ''}\n` +
+        '  Dictation keeps working. Use `pnpm stop` to quit.',
+    );
+  });
+  tray.start(writeIcons(path.join(PROJECT_ROOT, '.cache', 'icons')));
+}
 
 const recorder = new Recorder(resolveDeviceIndex(config.recording.device));
 const hotkey = new PushToTalk(config.hotkey);
@@ -29,6 +95,31 @@ const sounds = new Sounds(config.sounds);
 const transcriber = createTranscriber(config, dictionary);
 const polisher = config.polish.enabled ? new Polisher(config, dictionary) : null;
 const history = new History(config.history, baseDir);
+
+// ---------------------------------------------------------------------------
+// Tray status
+// ---------------------------------------------------------------------------
+
+let paused = false;
+let pending = 0;
+let lastText: string | null = null;
+
+function updateStatus(): void {
+  if (!tray) return;
+  if (recorder.isRecording) tray.setState('recording', 'Recording...');
+  else if (pending > 0) tray.setState('processing', 'Transcribing...');
+  else if (paused) tray.setState('paused', 'Paused');
+  else tray.setState('idle', `Ready - hold ${hotkey.label}`);
+}
+
+function setPaused(value: boolean): void {
+  paused = value;
+  hotkey.setEnabled(!value);
+  if (value) void stopRecording(false);
+  tray?.setPaused(value);
+  log(value ? 'Dictation paused.' : 'Dictation resumed.');
+  updateStatus();
+}
 
 // ---------------------------------------------------------------------------
 // Recording lifecycle
@@ -45,9 +136,11 @@ async function startRecording(): Promise<void> {
     hotkey.reset();
     sounds.play('error');
     logError('Could not start the microphone:', (error as Error).message);
+    updateStatus();
     return;
   }
   sounds.play('start');
+  updateStatus();
   clearTimeout(maxDurationTimer);
   maxDurationTimer = setTimeout(() => {
     log(`Max duration (${config.recording.maxDurationSec}s) reached, stopping.`);
@@ -70,6 +163,7 @@ async function stopRecording(keep: boolean): Promise<void> {
     sounds.play('stop');
     enqueue(() => processRecording(pcm));
   }
+  updateStatus();
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +172,14 @@ async function stopRecording(keep: boolean): Promise<void> {
 
 let queue: Promise<void> = Promise.resolve();
 function enqueue(task: () => Promise<void>): void {
-  queue = queue.then(task).catch((error) => logError('Unexpected error:', error));
+  pending++;
+  queue = queue
+    .then(task)
+    .catch((error) => logError('Unexpected error:', error))
+    .finally(() => {
+      pending--;
+      updateStatus();
+    });
 }
 
 async function processRecording(pcm: Int16Array): Promise<void> {
@@ -152,6 +253,8 @@ async function processRecording(pcm: Int16Array): Promise<void> {
   }
 
   // 3. Deliver.
+  lastText = text;
+  tray?.setLastAvailable(true);
   const output = config.output.trailingSpace ? `${text} ` : text;
   try {
     entry.delivered = await deliver(output, config.output, hotkey);
@@ -190,6 +293,62 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 // ---------------------------------------------------------------------------
+// Tray actions, restart, quit
+// ---------------------------------------------------------------------------
+
+async function copyLast(): Promise<void> {
+  if (!lastText) return;
+  try {
+    await clipboard.write(lastText);
+    log('Copied the last dictation to the clipboard.');
+  } catch (error) {
+    logError('Could not copy to the clipboard:', (error as Error).message);
+  }
+}
+
+function openConfig(): void {
+  let file = configPath;
+  if (!file) {
+    file = path.join(PROJECT_ROOT, 'config.yaml');
+    if (!existsSync(file)) {
+      copyFileSync(path.join(PROJECT_ROOT, 'config.example.yaml'), file);
+      log(`Created ${file} from config.example.yaml. Use "Restart" after editing it.`);
+    }
+  }
+  spawn('explorer.exe', [file], { detached: true, stdio: 'ignore' }).unref();
+}
+
+let tearingDown: Promise<void> | null = null;
+function teardown(): Promise<void> {
+  tearingDown ??= (async () => {
+    hotkey.stop();
+    clearTimeout(maxDurationTimer);
+    // Let a dictation that's being transcribed finish and paste.
+    await Promise.race([queue, sleep(15_000)]);
+    recorder.release();
+    sounds.release();
+    await tray?.close();
+    await new Promise<void>((resolve) => instance.close(() => resolve()));
+  })();
+  return tearingDown;
+}
+
+async function quit(): Promise<void> {
+  log('Quitting...');
+  await teardown();
+  log('Bye.');
+  process.exit(0);
+}
+
+async function restart(): Promise<void> {
+  log('Restarting (the new instance runs in the background)...');
+  await teardown();
+  const args = [...process.execArgv, process.argv[1] ?? '', ...argv.filter((a) => a !== '--restarted'), '--restarted'];
+  spawn(process.execPath, args, { detached: true, windowsHide: true, stdio: 'ignore' }).unref();
+  process.exit(0);
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -204,15 +363,16 @@ hotkey.on('cancel', (reason) => {
   if (reason === 'tap') sounds.play('cancel');
 });
 
-function shutdown(): void {
-  log('Bye.');
-  hotkey.stop();
-  recorder.release();
-  sounds.release();
-  process.exit(0);
+if (tray) {
+  tray.on('copy-last', () => void copyLast());
+  tray.on('toggle-pause', () => setPaused(!paused));
+  tray.on('open-config', () => openConfig());
+  tray.on('restart', () => void restart());
+  tray.on('quit', () => void quit());
 }
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+
+process.on('SIGINT', () => void quit());
+process.on('SIGTERM', () => void quit());
 
 hotkey.start();
 
@@ -225,4 +385,7 @@ console.log(`wisprcheap ready
   polish:     ${polishInfo}
   dictionary: ${dictionary.length} term(s)
   history:    ${config.history.enabled ? history.file : 'disabled'}
-Press Ctrl+C to quit.`);
+${tray ? 'Use the tray icon to show this log, pause, restart or quit.' : 'Press Ctrl+C to quit.'}`);
+
+ready = true;
+updateStatus();

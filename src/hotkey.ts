@@ -61,6 +61,7 @@ export class PushToTalk extends EventEmitter<PushToTalkEvents> {
   #pressedAt = 0;
   #tapTimer: NodeJS.Timeout | undefined;
   #ignoreOtherKeysUntil = 0;
+  #enabled = true;
 
   constructor(opts: Config['hotkey']) {
     super();
@@ -109,6 +110,12 @@ export class PushToTalk extends EventEmitter<PushToTalkEvents> {
     this.#state = 'idle';
   }
 
+  /** While disabled, key presses are still tracked but never start a recording. */
+  setEnabled(enabled: boolean): void {
+    this.#enabled = enabled;
+    if (!enabled) this.reset();
+  }
+
   #comboHeld(): boolean {
     return this.#groups.every((group) => [...group].some((code) => this.#pressed.has(code)));
   }
@@ -137,6 +144,7 @@ export class PushToTalk extends EventEmitter<PushToTalkEvents> {
   }
 
   #onComboDown(): void {
+    if (!this.#enabled) return;
     switch (this.#state) {
       case 'idle':
         this.#state = 'holding';

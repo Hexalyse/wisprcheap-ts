@@ -1,0 +1,15 @@
+<!--
+  Starts wisprcheap without any console window (used by the desktop shortcut).
+  Usage: wscript.exe launch-hidden.wsf "C:\path\to\node.exe"
+-->
+<job>
+  <script language="JScript">
+    var shell = new ActiveXObject("WScript.Shell");
+    var fso = new ActiveXObject("Scripting.FileSystemObject");
+    var root = fso.GetParentFolderName(fso.GetParentFolderName(WScript.ScriptFullName));
+    var node = WScript.Arguments.length > 0 ? WScript.Arguments(0) : "node.exe";
+    shell.CurrentDirectory = root;
+    // Window style 0 = hidden; don't wait for it to finish.
+    shell.Run('"' + node + '" --disable-warning=ExperimentalWarning "' + root + '\\src\\launch.ts" --gui', 0, false);
+  </script>
+</job>

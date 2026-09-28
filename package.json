@@ -8,7 +8,10 @@
     "node": ">=24"
   },
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "start": "node --disable-warning=ExperimentalWarning src/launch.ts",
+    "start:fg": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "stop": "node --disable-warning=ExperimentalWarning src/launch.ts --stop",
+    "shortcut": "node --disable-warning=ExperimentalWarning scripts/create-shortcut.ts",
     "devices": "node --disable-warning=ExperimentalWarning src/devices.ts",
     "stats": "node --disable-warning=ExperimentalWarning src/stats.ts",
     "test:smoke": "node --disable-warning=ExperimentalWarning scripts/smoke.ts",

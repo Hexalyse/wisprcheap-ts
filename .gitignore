@@ -1,5 +1,7 @@
 node_modules/
+.cache/
 .env
 config.yaml
 history.jsonl
 recordings/
+wisprcheap.log*
