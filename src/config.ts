@@ -19,6 +19,15 @@ const dictionaryEntry = z.union([
   }),
 ]);
 
+/** Optional LLM connection fields; unset ones fall back to the polish settings. */
+const llmOverrides = z.object({
+  apiKey: z.string().optional(),
+  baseUrl: z.string().optional(),
+  model: z.string().optional(),
+  reasoningEffort: z.string().nullable().optional(),
+  temperature: z.number().min(0).max(2).nullable().optional(),
+});
+
 const schema = z.object({
   hotkey: z
     .object({
@@ -94,20 +103,35 @@ const schema = z.object({
       temperature: z.number().min(0).max(2).nullable().default(null),
       timeoutMs: z.number().int().positive().default(10_000),
       instructions: z.string().trim().min(1).default(DEFAULT_POLISH_INSTRUCTIONS),
+      /**
+       * Skip the polish call when the raw transcript has fewer words than this and paste it as is (~2 s faster).
+       * Useful with transcription.elevenlabs.noVerbatim, which already removes filler words. 0 = always polish.
+       */
+      minWords: z.number().int().nonnegative().default(0),
     })
     .prefault({}),
 
   dictionary: z.array(dictionaryEntry).nullable().default([]),
 
   /** LLM used by command mode. Every unset field falls back to the polish settings. */
-  command: z
+  command: llmOverrides.extend({ timeoutMs: z.number().int().positive().default(30_000) }).prefault({}),
+
+  /**
+   * Translation mode: pick a pair in the tray menu and dictations are translated before pasting.
+   * "from" is also sent to the transcriber as the spoken language; omit it to auto-detect.
+   * The LLM fields fall back to the polish settings.
+   */
+  translation: llmOverrides
+    .extend({
+      pairs: z.array(z.object({ from: z.string().optional(), to: z.string().min(2) })).default([]),
+      timeoutMs: z.number().int().positive().default(15_000),
+    })
+    .prefault({}),
+
+  notifications: z
     .object({
-      apiKey: z.string().optional(),
-      baseUrl: z.string().optional(),
-      model: z.string().optional(),
-      reasoningEffort: z.string().nullable().optional(),
-      temperature: z.number().min(0).max(2).nullable().optional(),
-      timeoutMs: z.number().int().positive().default(30_000),
+      /** Show a Windows notification when something fails (transcription, command, config reload...). */
+      errors: z.boolean().default(true),
     })
     .prefault({}),
 
@@ -161,7 +185,53 @@ export interface LoadedConfig {
   dictionary: DictionaryEntry[];
   /** Command-mode LLM with the polish fallbacks applied. */
   commandLlm: LlmOptions;
+  /** Translation LLM with the polish fallbacks applied. */
+  translationLlm: LlmOptions;
+  translationPairs: TranslationPair[];
 }
+
+export interface TranslationPair {
+  /** Canonical language code of the spoken language, or null to auto-detect. */
+  from: string | null;
+  to: string;
+  /** Name of the target language, e.g. "English". */
+  toName: string;
+  /** Stable id used to remember the choice, e.g. "fr>en" or "auto>en". */
+  id: string;
+  /** "French → English", "Any → English". */
+  label: string;
+}
+
+const languageNames = new Intl.DisplayNames(['en'], { type: 'language' });
+
+function canonicalLanguage(code: string): string | null {
+  try {
+    return Intl.getCanonicalLocales(code.trim())[0]?.split('-')[0]?.toLowerCase() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function languageName(code: string): string {
+  try {
+    return languageNames.of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
+
+function resolveLlm(overrides: z.infer<typeof llmOverrides>, polish: Config['polish'], timeoutMs: number): LlmOptions {
+  return {
+    apiKey: overrides.apiKey || polish.apiKey,
+    baseUrl: overrides.baseUrl ?? polish.baseUrl,
+    model: overrides.model ?? polish.model,
+    reasoningEffort: overrides.reasoningEffort === undefined ? polish.reasoningEffort : overrides.reasoningEffort,
+    temperature: overrides.temperature === undefined ? polish.temperature : overrides.temperature,
+    timeoutMs,
+  };
+}
+
+const isLocal = (url: string) => /localhost|127\.0\.0\.1/.test(url);
 
 /** Values we set from .env files, so a reload can update them without overriding the real environment. */
 const envFromFiles = new Set<string>();
@@ -244,17 +314,27 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): LoadedConfig
   }
 
   const c = config.command;
-  const commandLlm: LlmOptions = {
-    apiKey: c.apiKey || config.polish.apiKey,
-    baseUrl: c.baseUrl ?? config.polish.baseUrl,
-    model: c.model ?? config.polish.model,
-    reasoningEffort: c.reasoningEffort === undefined ? config.polish.reasoningEffort : c.reasoningEffort,
-    temperature: c.temperature === undefined ? config.polish.temperature : c.temperature,
-    timeoutMs: c.timeoutMs,
-  };
-  const commandIsLocal = /localhost|127\.0\.0\.1/.test(commandLlm.baseUrl);
-  if (config.hotkey.commandKeys.length && !commandLlm.apiKey && !commandIsLocal) {
+  const commandLlm = resolveLlm(c, config.polish, c.timeoutMs);
+  if (config.hotkey.commandKeys.length && !commandLlm.apiKey && !isLocal(commandLlm.baseUrl)) {
     problems.push('command mode needs an API key (command.apiKey, polish.apiKey or OPENAI_API_KEY), or set hotkey.commandKeys: []');
+  }
+
+  const tr = config.translation;
+  const translationLlm = resolveLlm(tr, config.polish, tr.timeoutMs);
+  const translationPairs: TranslationPair[] = [];
+  for (const pair of tr.pairs) {
+    const from = pair.from && pair.from.toLowerCase() !== 'auto' ? canonicalLanguage(pair.from) : null;
+    const to = canonicalLanguage(pair.to);
+    if ((pair.from && pair.from.toLowerCase() !== 'auto' && !from) || !to) {
+      problems.push(`translation.pairs: "${pair.from ?? 'auto'} -> ${pair.to}" uses an invalid language code`);
+      continue;
+    }
+    const id = `${from ?? 'auto'}>${to}`;
+    if (translationPairs.some((p) => p.id === id)) continue;
+    translationPairs.push({ from, to, toName: languageName(to), id, label: `${from ? languageName(from) : 'Any'} → ${languageName(to)}` });
+  }
+  if (translationPairs.length && !translationLlm.apiKey && !isLocal(translationLlm.baseUrl)) {
+    problems.push('translation needs an API key (translation.apiKey, polish.apiKey or OPENAI_API_KEY)');
   }
   if (problems.length) throw new Error(`Config problems:\n  - ${problems.join('\n  - ')}`);
 
@@ -268,7 +348,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): LoadedConfig
     dictionary.push(normalized);
   }
 
-  return { config, configPath, baseDir, dictionary, commandLlm };
+  return { config, configPath, baseDir, dictionary, commandLlm, translationLlm, translationPairs };
 }
 
 /** The config file to create/edit: the one in use, or the project's config.yaml (created from the example). */

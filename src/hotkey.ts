@@ -113,9 +113,14 @@ export class PushToTalk extends EventEmitter<PushToTalkEvents> {
   }
 
   start(): void {
+    this.listen();
+    uIOhook.start();
+  }
+
+  /** Subscribe to key events without starting the OS hook (tests emit events on `uIOhook` directly). */
+  listen(): void {
     uIOhook.on('keydown', (e) => this.#onKeyDown(e));
     uIOhook.on('keyup', (e) => this.#onKeyUp(e));
-    uIOhook.start();
   }
 
   stop(): void {

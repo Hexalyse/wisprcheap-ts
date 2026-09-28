@@ -18,7 +18,7 @@ mkdirSync(dir, { recursive: true });
 const userClipboard = await clipboard.read().catch(() => null);
 
 // --- mock APIs ---------------------------------------------------------------
-let sttMode: 'dictation' | 'fail' | 'command' = 'dictation';
+let sttMode: 'dictation' | 'fail' | 'command' | 'short' = 'dictation';
 const seen: { stt: Record<string, unknown>[]; chat: { system: string; user: string; model: string }[] } = { stt: [], chat: [] };
 
 const server = createServer(async (req, res) => {
@@ -31,9 +31,10 @@ const server = createServer(async (req, res) => {
   };
   if (req.url === '/v1/speech-to-text') {
     const form = await new Request('http://x', { method: 'POST', headers: req.headers as HeadersInit, body }).formData();
-    seen.stt.push({ apiKey: req.headers['xi-api-key'], model_id: form.get('model_id'), keyterms: form.getAll('keyterms') });
+    seen.stt.push({ apiKey: req.headers['xi-api-key'], model_id: form.get('model_id'), keyterms: form.getAll('keyterms'), language_code: form.get('language_code') });
     if (sttMode === 'fail') return json(500, { detail: 'mock outage' });
     if (sttMode === 'command') return json(200, { text: 'write a short thank you message' });
+    if (sttMode === 'short') return json(200, { text: 'Yes, please.' });
     return json(200, { text: 'um so I think we should uh we should meet at 3, no, at 4 to talk about cube ernetes' });
   }
   if (req.url === '/v1/chat/completions') {
@@ -42,7 +43,9 @@ const server = createServer(async (req, res) => {
     seen.chat.push({ system, user: data.messages[1].content, model: data.model });
     const content = system.includes('text assistant driven by voice')
       ? 'Thank you so much for your help!'
-      : 'I think we should meet at 4 to talk about Kubernetes.';
+      : system.includes('translated into English')
+        ? 'We should meet at 4.'
+        : 'I think we should meet at 4 to talk about Kubernetes.';
     return json(200, { choices: [{ message: { content } }], usage: { prompt_tokens: 420, completion_tokens: 14 } });
   }
   res.writeHead(404).end();
@@ -66,8 +69,13 @@ transcription:
 polish:
   apiKey: sk-test
   baseUrl: http://127.0.0.1:47821/v1
+  minWords: 3
 command:
   model: command-model
+translation:
+  model: translation-model
+  pairs:
+    - { from: fr, to: en }
 dictionary:
   - Kubernetes
   - term: pnpm
@@ -146,6 +154,37 @@ check('command sent the instruction', !!commandCall?.user.includes('write a shor
 check('command prompt has the dictionary', !!commandCall?.system.includes('- Kubernetes'));
 check('command result on the clipboard', (await clipboard.read()) === 'Thank you so much for your help!');
 sttMode = 'dictation';
+
+// 3b. Short dictation: under polish.minWords (3), pasted as transcribed without calling the LLM
+sttMode = 'short';
+let chatCalls = seen.chat.length;
+mark = output.length;
+await hold([UiohookKey.F13], 1000);
+check('short dictation pasted without polish', await waitFor('polish skipped (2 words)', mark));
+check('no LLM call for the short dictation', seen.chat.length === chatCalls);
+check('short text on the clipboard as transcribed', (await clipboard.read()) === 'Yes, please. ');
+
+// 3c. Translation mode fr -> en: spoken language sent to Scribe, translation prompt + model used
+sttMode = 'dictation';
+check('translation selected', (await sendCommand('translate 0')) === 'ok');
+await waitFor('Translation on: French → English', mark);
+mark = output.length;
+await hold([UiohookKey.F13], 1000);
+check('translated dictation', await waitFor('text: We should meet at 4.', mark));
+check('spoken language forced to fr', seen.stt.at(-1)?.language_code === 'fr', String(seen.stt.at(-1)?.language_code));
+check('translation model used', seen.chat.at(-1)?.model === 'translation-model', seen.chat.at(-1)?.model);
+sttMode = 'short';
+chatCalls = seen.chat.length;
+mark = output.length;
+await hold([UiohookKey.F13], 1000);
+await waitFor('text:', mark);
+check('short dictations are still translated', seen.chat.length === chatCalls + 1);
+sttMode = 'dictation';
+await sendCommand('translate -1');
+mark = output.length;
+await hold([UiohookKey.F13], 1000);
+await waitFor('text:', mark);
+check('translation off again: language back to auto', seen.stt.at(-1)?.language_code === null, String(seen.stt.at(-1)?.language_code));
 
 // 4. Add clipboard to dictionary -> config.yaml edited in place -> auto reload
 await clipboard.write('Terraform');

@@ -54,6 +54,9 @@ polish:
   reasoningEffort: none    # set to null for models without reasoning_effort (gpt-4.1-mini, most non-OpenAI models)
   temperature: null
   timeoutMs: 10000         # on timeout or error the raw transcript is pasted
+  # Skip polish when the raw transcript has fewer words than this: short dictations are pasted as transcribed,
+  # about 2 s sooner. Works best with transcription.elevenlabs.noVerbatim: true (Scribe then removes fillers). 0 = always polish.
+  minWords: 0
   instructions: |
     Remove filler words, repeated starts, and abandoned phrases. When I correct myself, keep the final version.
     Fix punctuation and capitalization. Preserve my meaning, wording, names, and numbers.
@@ -77,6 +80,22 @@ command:
   # apiKey: ${OPENAI_API_KEY}
   # reasoningEffort: none
   timeoutMs: 30000
+
+# Translation mode: the pairs below appear in the tray menu ("Translate dictation"). While one is selected,
+# every dictation is cleaned up and translated before pasting (the choice is remembered across restarts).
+# "from" is also sent to the transcriber as the spoken language (better accuracy); omit it to auto-detect.
+# Codes are ISO 639-1 (en, fr, de, es...). The LLM fields fall back to the polish settings, like command mode.
+translation:
+  pairs: []
+  #  - { from: fr, to: en }
+  #  - { from: en, to: fr }
+  #  - { to: en }            # any spoken language -> English
+  # model: gpt-6-sol         # a stronger model gives more natural translations
+  # reasoningEffort: low
+  timeoutMs: 15000           # on timeout or error the untranslated text is pasted (with a notification)
+
+notifications:
+  errors: true             # Windows notification when something fails; click it to open the log
 
 output:
   paste: true              # simulate Ctrl+V into the focused app (the text is always copied to the clipboard)

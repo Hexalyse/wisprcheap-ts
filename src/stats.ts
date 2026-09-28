@@ -1,5 +1,5 @@
 import { loadConfig } from './config.ts';
-import { History, readHistory, type HistoryEntry } from './history.ts';
+import { History, monthKey, readHistory, type HistoryEntry } from './history.ts';
 
 const { config, baseDir } = (() => {
   try {
@@ -19,7 +19,7 @@ if (!entries.length) {
 
 const byMonth = new Map<string, HistoryEntry[]>();
 for (const e of entries) {
-  const month = e.ts.slice(0, 7);
+  const month = monthKey(new Date(e.ts)); // local time, like the tray's monthly total
   byMonth.set(month, [...(byMonth.get(month) ?? []), e]);
 }
 

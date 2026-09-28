@@ -10,6 +10,10 @@ export interface HistoryEntry {
   selection?: string | null;
   /** True when this entry is a retry of a failed recording. */
   retry?: boolean;
+  /** Translation pair used, e.g. "fr>en". */
+  translation?: string;
+  /** Word count of a transcript pasted without polish because it was shorter than polish.minWords. */
+  polishSkipped?: number;
   durationSec: number;
   transcription: { provider: string; model: string; ms: number; keyterms: number };
   polish: { model: string; ms: number; inputTokens: number; outputTokens: number; error?: string } | null;
@@ -22,8 +26,32 @@ export interface HistoryEntry {
   audioFile?: string;
 }
 
+export interface MonthTotals {
+  month: string;
+  costUsd: number;
+  words: number;
+  entries: number;
+}
+
 export function countWords(text: string): number {
   return text.split(/\s+/).filter(Boolean).length;
+}
+
+/** "2026-09" in local time. */
+export function monthKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+/** Totals for one month. Failed transcriptions have no cost and are skipped by construction. */
+export function totalsFor(entries: HistoryEntry[], month: string): MonthTotals {
+  const totals: MonthTotals = { month, costUsd: 0, words: 0, entries: 0 };
+  for (const e of entries) {
+    if (monthKey(new Date(e.ts)) !== month) continue;
+    totals.costUsd += e.costUsd?.total ?? e.costUsd?.transcription ?? 0;
+    totals.words += e.words ?? 0;
+    if (!e.error && e.words > 0) totals.entries++;
+  }
+  return totals;
 }
 
 export class History {
@@ -31,19 +59,34 @@ export class History {
   #audioDir: string;
   #enabled: boolean;
   #saveFailedAudio: boolean;
+  #month: MonthTotals;
 
   constructor(opts: { enabled: boolean; path: string; saveFailedAudio: boolean; failedAudioDir: string }, baseDir: string) {
     this.#enabled = opts.enabled;
     this.#saveFailedAudio = opts.saveFailedAudio;
     this.#file = path.resolve(baseDir, opts.path);
     this.#audioDir = path.resolve(baseDir, opts.failedAudioDir);
+    this.#month = totalsFor(readHistory(this.#file), monthKey(new Date()));
   }
 
   get file(): string {
     return this.#file;
   }
 
+  /** Running totals for the current month (from the file at startup, then updated on each append). */
+  get currentMonth(): MonthTotals {
+    const month = monthKey(new Date());
+    if (this.#month.month !== month) this.#month = { month, costUsd: 0, words: 0, entries: 0 };
+    return this.#month;
+  }
+
   append(entry: HistoryEntry): void {
+    const month = this.currentMonth;
+    const added = totalsFor([entry], month.month);
+    month.costUsd += added.costUsd;
+    month.words += added.words;
+    month.entries += added.entries;
+
     if (!this.#enabled) return;
     try {
       mkdirSync(path.dirname(this.#file), { recursive: true });

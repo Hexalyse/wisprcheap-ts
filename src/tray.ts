@@ -26,6 +26,8 @@ export interface TrayEvents {
   'open-config': [];
   restart: [];
   quit: [];
+  /** Emitted for "translate <index>" (-1 = off). */
+  translate: [index: number];
   /** The helper exited on its own (crash, killed...). */
   exit: [code: number | null, stderr: string];
 }
@@ -62,7 +64,9 @@ export class Tray extends EventEmitter<TrayEvents> {
 
     createInterface({ input: proc.stdout }).on('line', (raw) => {
       const line = raw.replace(/^\uFEFF/, '').trim();
-      if ((ACTIONS as readonly string[]).includes(line)) this.emit(line as Action);
+      const translate = /^translate (-?\d+)$/.exec(line);
+      if (translate) this.emit('translate', Number(translate[1]));
+      else if ((ACTIONS as readonly string[]).includes(line)) this.emit(line as Action);
     });
   }
 
@@ -89,6 +93,22 @@ export class Tray extends EventEmitter<TrayEvents> {
 
   setPaused(paused: boolean): void {
     this.#send(`paused ${paused ? 1 : 0}`);
+  }
+
+  /** Text of the "This month" line of the menu. */
+  setMonth(text: string): void {
+    this.#send(`month ${text}`);
+  }
+
+  /** Labels of the translation pairs (empty hides the submenu) and the selected index (-1 = off). */
+  setTranslations(labels: string[], selected: number): void {
+    this.#send(`translations ${labels.map((l) => l.replace(/\t/g, ' ')).join('\t')}`);
+    this.#send(`translation ${selected}`);
+  }
+
+  /** Windows notification (clicking it opens the log). */
+  notifyError(title: string, message: string): void {
+    this.#send(`notify ${title.replace(/\t/g, ' ')}\t${message}`);
   }
 
   showLog(): void {

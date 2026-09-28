@@ -9,10 +9,12 @@ cleaned up by a cheap LLM ("polish" pass), copied to the clipboard and pasted in
   or say "write a short reply saying I'll be late" with nothing selected
 - Dictionary of names and technical terms: sent to Scribe as `keyterms` (or to OpenAI as a `prompt`) and to the polish model.
   Add a word by selecting it and pressing **Ctrl + Win + Shift**
-- Automatic language detection, and the polish pass never translates
-- Short sound cues for start, stop, hands-free, command, cancel and error
+- Automatic language detection, and the polish pass never translates, unless you turn on **translation mode**
+  (French → English, etc.: pairs configured in `config.yaml`, chosen from the tray)
+- Short dictations can skip the polish step and paste ~2 s sooner (`polish.minWords`)
+- Short sound cues for start, stop, hands-free, command, cancel and error, plus a Windows notification when something fails
 - `history.jsonl` log with raw and polished text, timings and estimated cost, plus `pnpm stats`
-- Runs in the background with a tray icon: status color, log window, pause, copy last dictation, retry a failed one...
+- Runs in the background with a tray icon: status color, this month's estimated cost, log window, pause, retry a failed dictation...
 - Follows the default microphone (plug in a headset, it's used from the next dictation)
 - No settings UI: one YAML file, applied as soon as you save it
 
@@ -46,15 +48,37 @@ Only one instance runs at a time. Output is written to `wisprcheap.log` (rotated
 
 The icon color shows the state: **grey** ready, **red** recording, **amber** transcribing/polishing, **light grey with a slash** paused.
 
+The top of the menu shows the status and this month's estimated cost and word count (from `history.jsonl`, updated after each dictation).
+
 - **Left-click** (or "Show log") toggles the log window. Closing it, or pressing Esc, only hides it; the app keeps running.
 - **Copy last dictation** puts the last polished text back on the clipboard.
 - **Retry last failed** re-sends the last recording whose transcription failed (e.g. network or quota error).
   The result goes to the clipboard, since focus is on the tray at that moment.
+- **Translate dictation** (only shown when `translation.pairs` is set): pick a pair, or Off. The choice is remembered.
 - **Add clipboard to dictionary** adds the copied word or phrase to `config.yaml`.
 - **Pause dictation** ignores the shortcuts until you resume.
 - **Open config.yaml** opens it in your default editor. Saved changes apply immediately.
 - **Restart** fully restarts the app (not needed for config changes).
 - **Quit** waits for a dictation in progress to finish, then exits.
+
+When something fails (transcription, command, translation, microphone, config reload...), a Windows notification
+says what happened; click it to open the log. Turn it off with `notifications.errors: false`.
+
+## Translation mode
+
+List the pairs you want in `config.yaml`; they appear under **Translate dictation** in the tray:
+
+```yaml
+translation:
+  pairs:
+    - { from: fr, to: en }   # speak French, paste English
+    - { from: en, to: fr }
+    - { to: de }             # any language -> German
+```
+
+While a pair is selected, every dictation (even a short one) is cleaned up and translated in one LLM call, and `from`
+is sent to the transcriber as the spoken language. Command mode is not affected. Translation uses the polish model
+unless `translation.model` is set (e.g. `gpt-6-sol` with `reasoningEffort: low` for more natural translations, but slower).
 
 ## How it behaves
 
@@ -115,7 +139,10 @@ Command mode is billed per command (transcription of the instruction, plus the L
 Even 20 commands a day with gpt-6-sol is about $2-3 per month. These estimates assume a selection of a few sentences;
 longer selections cost proportionally more.
 
-`pnpm stats` shows your real numbers based on the history file.
+Translation mode costs the same as polish with the same model (one LLM call per dictation). `polish.minWords` saves
+the polish call for short dictations, which lowers the polish cost a little more.
+
+`pnpm stats` shows your real numbers based on the history file, and the tray menu shows the current month's total.
 
 ## Notes
 
@@ -128,10 +155,15 @@ longer selections cost proportionally more.
 - The tray is a small C# program (`src/tray/`) compiled at startup by the built-in Windows PowerShell 5.1, so it needs no extra dependency.
   If it can't start, dictation keeps working and the reason is written to the log.
 - The desktop shortcut runs `scripts/launch-hidden.wsf` through `wscript.exe` so that no console window appears.
-- `pnpm test:smoke` checks sounds, the microphone and the hotkey state machine, including command mode and add-word
-  (using injected F13-F17 keys, which have no Windows shortcuts).
-  `pnpm test:e2e` runs the whole app against a local mock API: dictation, retry, command mode, adding a word and config reload.
-  It never sends Ctrl+C / Ctrl+V (`WISPRCHEAP_NO_INJECT=1`), so it can't touch the window you're working in.
+- Tests:
+  - `pnpm test`: unit tests that need no microphone, keyboard or network (config, dictionary editing, prompts, the hotkey
+    state machine driven by synthetic key events, LLM calls against a local mock). They run on GitHub Actions on every push.
+  - `pnpm test:smoke`: sounds, the real microphone and the real keyboard hook (with injected F13-F17 keys, which have no
+    Windows shortcuts).
+  - `pnpm test:e2e`: the whole app against a local mock API (dictation, retry, command mode, short dictations,
+    translation, adding a word, config reload). It never sends Ctrl+C / Ctrl+V (`WISPRCHEAP_NO_INJECT=1`),
+    so it can't touch the window you're working in.
+  - The last two need a Windows desktop session with a microphone, so they only run locally.
 
 ## License
 

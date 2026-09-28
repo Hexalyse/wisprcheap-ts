@@ -6,7 +6,8 @@ export interface Transcriber {
   readonly model: string;
   /** Number of dictionary terms actually sent to the API (for cost estimates). */
   readonly keytermCount: number;
-  transcribe(pcm: Int16Array, signal: AbortSignal): Promise<string>;
+  /** @param language Spoken language for this request (overrides the config), or undefined to use the config. */
+  transcribe(pcm: Int16Array, signal: AbortSignal, language?: string): Promise<string>;
 }
 
 async function readError(res: Response): Promise<string> {
@@ -40,7 +41,8 @@ function createElevenLabs(config: Config, dictionary: DictionaryEntry[]): Transc
     provider: 'elevenlabs',
     model: opts.model,
     keytermCount: keyterms.length,
-    async transcribe(pcm, signal) {
+    async transcribe(pcm, signal, languageOverride) {
+      const lang = languageOverride ?? language;
       const form = new FormData();
       form.append('model_id', opts.model);
       // Raw 16 kHz mono s16le is accepted directly and gives lower latency than an encoded file.
@@ -48,7 +50,7 @@ function createElevenLabs(config: Config, dictionary: DictionaryEntry[]): Transc
       form.append('file_format', 'pcm_s16le_16');
       form.append('tag_audio_events', 'false');
       form.append('timestamps_granularity', 'none');
-      if (language !== 'auto') form.append('language_code', language);
+      if (lang !== 'auto') form.append('language_code', lang);
       if (opts.noVerbatim) form.append('no_verbatim', 'true');
       for (const term of keyterms) form.append('keyterms', term);
 
@@ -74,13 +76,14 @@ function createOpenAI(config: Config, dictionary: DictionaryEntry[]): Transcribe
     provider: 'openai',
     model: opts.model,
     keytermCount: 0,
-    async transcribe(pcm, signal) {
+    async transcribe(pcm, signal, languageOverride) {
+      const lang = languageOverride ?? language;
       const form = new FormData();
       form.append('model', opts.model);
       form.append('file', new Blob([new Uint8Array(encodeWav(pcm))], { type: 'audio/wav' }), 'audio.wav');
       form.append('response_format', 'json');
       form.append('temperature', '0');
-      if (language !== 'auto') form.append('language', language);
+      if (lang !== 'auto') form.append('language', lang);
       if (prompt) form.append('prompt', prompt);
 
       const res = await fetch(`${opts.baseUrl.replace(/\/$/, '')}/audio/transcriptions`, {

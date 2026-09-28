@@ -2,9 +2,11 @@
 //
 // Protocol, one UTF-8 line per message:
 //   stdin  (from Node): "state <idle|recording|processing|paused>\t<text>", "log <line>",
-//                       "last <0|1>", "failed <0|1>", "paused <0|1>", "show-log", "exit"
+//                       "last <0|1>", "failed <0|1>", "paused <0|1>", "month <text>",
+//                       "translations <label>\t<label>...", "translation <index|-1>",
+//                       "notify <title>\t<message>", "show-log", "exit"
 //   stdout (to Node):   "ready", "copy-last", "retry-failed", "add-clipboard", "toggle-pause",
-//                       "open-config", "restart", "quit"
+//                       "translate <index|-1>", "open-config", "restart", "quit"
 // When stdin closes (Node died), the tray exits.
 
 using System;
@@ -24,7 +26,9 @@ public static class WisprTray
     const int MaxLines = 3000;
 
     static NotifyIcon notifyIcon;
-    static ToolStripMenuItem statusItem, logItem, copyItem, retryItem, pauseItem;
+    static ToolStripMenuItem statusItem, monthItem, logItem, copyItem, retryItem, pauseItem, translateMenu;
+    static ToolStripSeparator translateSeparator;
+    static int selectedTranslation = -1;
     static Form logForm;
     static TextBox logBox;
     static readonly List<string> lines = new List<string>();
@@ -59,20 +63,27 @@ public static class WisprTray
         ContextMenuStrip menu = new ContextMenuStrip();
         statusItem = new ToolStripMenuItem("wisprcheap");
         statusItem.Enabled = false;
+        monthItem = new ToolStripMenuItem("This month: -");
+        monthItem.Enabled = false;
         logItem = new ToolStripMenuItem("Show log", null, delegate { ToggleLog(); });
         logItem.Font = new Font(logItem.Font, FontStyle.Bold);
         copyItem = new ToolStripMenuItem("Copy last dictation", null, delegate { Send("copy-last"); });
         copyItem.Enabled = false;
         retryItem = new ToolStripMenuItem("Retry last failed", null, delegate { Send("retry-failed"); });
         retryItem.Enabled = false;
+        translateMenu = new ToolStripMenuItem("Translate dictation");
+        translateMenu.Visible = false;
+        translateSeparator = new ToolStripSeparator();
+        translateSeparator.Visible = false;
         ToolStripMenuItem addItem = new ToolStripMenuItem("Add clipboard to dictionary", null, delegate { Send("add-clipboard"); });
         pauseItem = new ToolStripMenuItem("Pause dictation", null, delegate { Send("toggle-pause"); });
         ToolStripMenuItem configItem = new ToolStripMenuItem("Open config.yaml", null, delegate { Send("open-config"); });
         ToolStripMenuItem restartItem = new ToolStripMenuItem("Restart", null, delegate { Send("restart"); });
         ToolStripMenuItem quitItem = new ToolStripMenuItem("Quit", null, delegate { Send("quit"); });
         menu.Items.AddRange(new ToolStripItem[] {
-            statusItem, new ToolStripSeparator(),
+            statusItem, monthItem, new ToolStripSeparator(),
             logItem, copyItem, retryItem, new ToolStripSeparator(),
+            translateMenu, translateSeparator,
             addItem, pauseItem, new ToolStripSeparator(),
             configItem, restartItem, new ToolStripSeparator(),
             quitItem
@@ -87,6 +98,7 @@ public static class WisprTray
         {
             if (e.Button == MouseButtons.Left) ToggleLog();
         };
+        notifyIcon.BalloonTipClicked += delegate { ShowLog(); };
         notifyIcon.Visible = true;
 
         Thread reader = new Thread(delegate() { ReadLoop(input); });
@@ -135,9 +147,64 @@ public static class WisprTray
             case "last": copyItem.Enabled = arg == "1"; break;
             case "failed": retryItem.Enabled = arg == "1"; break;
             case "paused": pauseItem.Checked = arg == "1"; break;
+            case "month": monthItem.Text = arg; break;
+            case "translations": SetTranslations(arg); break;
+            case "translation": SelectTranslation(arg); break;
+            case "notify": Notify(arg); break;
             case "show-log": ShowLog(); break;
             case "exit": Exit(); break;
         }
+    }
+
+    // Submenu: "Off" + one radio-style item per configured pair. Hidden when no pairs are configured.
+    static void SetTranslations(string arg)
+    {
+        translateMenu.DropDownItems.Clear();
+        string[] labels = arg.Length == 0 ? new string[0] : arg.Split('\t');
+        ToolStripMenuItem off = new ToolStripMenuItem("Off", null, delegate { Send("translate -1"); });
+        off.Tag = -1;
+        translateMenu.DropDownItems.Add(off);
+        translateMenu.DropDownItems.Add(new ToolStripSeparator());
+        for (int i = 0; i < labels.Length; i++)
+        {
+            int index = i;
+            ToolStripMenuItem item = new ToolStripMenuItem(labels[i], null, delegate { Send("translate " + index); });
+            item.Tag = index;
+            translateMenu.DropDownItems.Add(item);
+        }
+        translateMenu.Visible = labels.Length > 0;
+        translateSeparator.Visible = labels.Length > 0;
+        RefreshTranslationChecks();
+    }
+
+    static void SelectTranslation(string arg)
+    {
+        int index;
+        selectedTranslation = int.TryParse(arg, out index) ? index : -1;
+        RefreshTranslationChecks();
+    }
+
+    static void RefreshTranslationChecks()
+    {
+        string label = "Translate dictation";
+        foreach (ToolStripItem item in translateMenu.DropDownItems)
+        {
+            ToolStripMenuItem menuItem = item as ToolStripMenuItem;
+            if (menuItem == null) continue;
+            bool selected = (int)menuItem.Tag == selectedTranslation;
+            menuItem.Checked = selected;
+            if (selected && selectedTranslation >= 0) label = "Translate dictation: " + menuItem.Text;
+        }
+        translateMenu.Text = label;
+    }
+
+    static void Notify(string arg)
+    {
+        int tab = arg.IndexOf('\t');
+        string title = tab < 0 ? "wisprcheap" : arg.Substring(0, tab);
+        string message = tab < 0 ? arg : arg.Substring(tab + 1);
+        if (message.Length > 250) message = message.Substring(0, 247) + "...";
+        notifyIcon.ShowBalloonTip(8000, title, message.Length == 0 ? " " : message, ToolTipIcon.Error);
     }
 
     static void SetState(string arg)

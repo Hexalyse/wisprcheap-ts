@@ -5,7 +5,7 @@ import path from 'node:path';
 import clipboard from 'clipboardy';
 import { loudestWindowDb, pcmDurationMs } from './audio.ts';
 import { Commander } from './command.ts';
-import { ensureConfigFile, loadConfig, PROJECT_ROOT, resolveBaseDir, type LoadedConfig } from './config.ts';
+import { ensureConfigFile, loadConfig, PROJECT_ROOT, resolveBaseDir, type LoadedConfig, type TranslationPair } from './config.ts';
 import { addDictionaryTerm } from './dictionary.ts';
 import { PushToTalk, type Mode } from './hotkey.ts';
 import { countWords, History, type HistoryEntry } from './history.ts';
@@ -17,6 +17,7 @@ import { Polisher } from './polish.ts';
 import { llmCost, transcriptionCost } from './pricing.ts';
 import { Recorder } from './recorder.ts';
 import { Sounds } from './sounds.ts';
+import { loadState, saveState } from './state.ts';
 import { createTranscriber, type Transcriber } from './transcribe.ts';
 import { Tray } from './tray.ts';
 
@@ -62,8 +63,14 @@ function handleCommand(command: string): string {
     case 'add-clipboard':
       setImmediate(() => enqueue(() => addWord('clipboard')));
       return 'ok';
-    default:
+    default: {
+      const translate = /^translate (-?\d+)$/.exec(command);
+      if (translate) {
+        setImmediate(() => selectTranslation(Number(translate[1])));
+        return 'ok';
+      }
       return 'unknown-command';
+    }
   }
 }
 
@@ -113,17 +120,62 @@ let transcriber!: Transcriber;
 let polisher: Polisher | null = null;
 let commander: Commander | null = null;
 let history!: History;
+let translationPairs: TranslationPair[] = [];
+let translators = new Map<string, Polisher>();
+const state = loadState();
 
 function buildPipeline(loaded: LoadedConfig): void {
   config = loaded.config;
   configPath = loaded.configPath;
   dictionary = loaded.dictionary;
   transcriber = createTranscriber(config, dictionary);
-  polisher = config.polish.enabled ? new Polisher(config, dictionary) : null;
+  polisher = config.polish.enabled ? new Polisher(config.polish, config.polish.instructions, dictionary) : null;
   commander = config.hotkey.commandKeys.length ? new Commander(loaded.commandLlm, dictionary) : null;
   history = new History(config.history, baseDir);
+  translationPairs = loaded.translationPairs;
+  translators = new Map(
+    translationPairs.map((pair) => [
+      pair.id,
+      new Polisher(loaded.translationLlm, config.polish.instructions, dictionary, pair.toName),
+    ]),
+  );
+  // A pair removed from the config turns translation off.
+  if (state.translation && !translators.has(state.translation)) state.translation = null;
+  refreshTray();
 }
 buildPipeline(initial);
+
+function currentPair(): TranslationPair | null {
+  return translationPairs.find((p) => p.id === state.translation) ?? null;
+}
+
+function selectTranslation(index: number): void {
+  const pair = translationPairs[index] ?? null;
+  state.translation = pair?.id ?? null;
+  saveState(state);
+  log(pair ? `Translation on: ${pair.label}.` : 'Translation off.');
+  refreshTray();
+  updateStatus();
+}
+
+/** Push everything the tray menu shows that doesn't depend on the recording state. */
+function refreshTray(): void {
+  if (!tray) return;
+  const pair = currentPair();
+  tray.setTranslations(
+    translationPairs.map((p) => p.label),
+    pair ? translationPairs.indexOf(pair) : -1,
+  );
+  const month = history.currentMonth;
+  const monthName = new Date().toLocaleString('en', { month: 'long' });
+  const cost = month.costUsd < 0.01 && month.costUsd > 0 ? '<$0.01' : `~$${month.costUsd.toFixed(2)}`;
+  tray.setMonth(`${monthName}: ${cost} - ${month.words.toLocaleString('en')} words`);
+}
+
+/** Error notification from the tray (config: notifications.errors). Clicking it opens the log. */
+function notifyError(title: string, message: string): void {
+  if (config.notifications.errors) tray?.notifyError(title, message);
+}
 
 // ---------------------------------------------------------------------------
 // Config auto-reload
@@ -146,6 +198,7 @@ function reloadConfig(): void {
   } catch (error) {
     logError(`Config not reloaded, keeping the previous settings:\n${(error as Error).message}`);
     sounds.play('error');
+    notifyError('Config not reloaded', `${(error as Error).message}\nThe previous settings are still used.`);
     return;
   }
   buildPipeline(next);
@@ -203,10 +256,13 @@ let lastFailed: { pcm: Int16Array; ts: Date } | null = null;
 
 function updateStatus(): void {
   if (!tray) return;
-  if (recorder.isRecording) tray.setState('recording', recordingMode === 'command' ? 'Recording command...' : 'Recording...');
-  else if (pending > 0) tray.setState('processing', busyLabel);
+  const pair = currentPair();
+  const translating = pair ? ` (to ${pair.toName})` : '';
+  if (recorder.isRecording) {
+    tray.setState('recording', recordingMode === 'command' ? 'Recording command...' : `Recording${translating}...`);
+  } else if (pending > 0) tray.setState('processing', busyLabel);
   else if (paused) tray.setState('paused', 'Paused');
-  else tray.setState('idle', `Ready - hold ${hotkey.label}`);
+  else tray.setState('idle', `Ready${translating} - hold ${hotkey.label}`);
 }
 
 function setPaused(value: boolean): void {
@@ -238,6 +294,7 @@ async function startRecording(mode: Mode): Promise<void> {
     hotkey.reset();
     sounds.play('error');
     logError('Could not start the microphone:', (error as Error).message);
+    notifyError('Microphone unavailable', (error as Error).message);
     updateStatus();
     return;
   }
@@ -318,13 +375,21 @@ function newEntry(pcm: Int16Array, startedAt: Date): HistoryEntry {
 }
 
 /** Transcribe with one retry on network errors/timeouts. Fills the entry's transcription fields. */
-async function transcribe(pcm: Int16Array, entry: HistoryEntry): Promise<string> {
+async function transcribe(pcm: Int16Array, entry: HistoryEntry, language?: string): Promise<string> {
   const t0 = performance.now();
-  const raw = await withRetry(() => transcriber.transcribe(pcm, AbortSignal.timeout(config.transcription.timeoutMs)));
+  const raw = await withRetry(() =>
+    transcriber.transcribe(pcm, AbortSignal.timeout(config.transcription.timeoutMs), language),
+  );
   entry.transcription.ms = Math.round(performance.now() - t0);
   entry.raw = raw;
   entry.costUsd.transcription = transcriptionCost(transcriber.model, entry.durationSec, transcriber.keytermCount);
   return raw;
+}
+
+/** Write the entry to the history and update the month total shown in the tray. */
+function record(entry: HistoryEntry): void {
+  history.append(entry);
+  refreshTray();
 }
 
 function finishEntry(entry: HistoryEntry, text: string): void {
@@ -337,63 +402,76 @@ function finishEntry(entry: HistoryEntry, text: string): void {
     polish: round(polish),
     total: transcription === null ? null : round(transcription + (polish ?? 0)),
   };
-  history.append(entry);
+  record(entry);
 }
 
 function timingSummary(entry: HistoryEntry, llmLabel: string): string {
-  const llm = entry.polish ? ` | ${llmLabel} ${entry.polish.ms} ms` : '';
+  const llm = entry.polish
+    ? ` | ${llmLabel} ${entry.polish.ms} ms`
+    : entry.polishSkipped !== undefined
+      ? ` | polish skipped (${entry.polishSkipped} words)`
+      : '';
   const cost = entry.costUsd.total !== null ? ` | ~$${entry.costUsd.total.toFixed(5)}` : '';
   return `${entry.durationSec.toFixed(1)}s audio | stt ${entry.transcription.ms} ms${llm}${cost}`;
 }
 
 /**
- * Dictation: transcribe, polish, paste. With `retry` (from the tray), the text only goes to the
- * clipboard, since focus is on the tray menu rather than on a text field.
+ * Dictation: transcribe, polish (or translate), paste. With `retry` (from the tray), the text only goes to
+ * the clipboard, since focus is on the tray menu rather than on a text field.
  */
 async function processDictation(pcm: Int16Array, retry = false): Promise<void> {
   const startedAt = new Date();
   if (!isUsableAudio(pcm)) return;
   const entry = newEntry(pcm, startedAt);
   if (retry) entry.retry = true;
+  const pair = currentPair();
+  const translator = pair ? translators.get(pair.id) : undefined;
+  if (pair) entry.translation = pair.id;
 
   let raw: string;
   try {
-    raw = await transcribe(pcm, entry);
+    raw = await transcribe(pcm, entry, pair?.from ?? undefined);
   } catch (error) {
     entry.error = (error as Error).message;
     if (!retry) entry.audioFile = history.saveFailedAudio(pcm, startedAt);
-    history.append(entry);
+    record(entry);
     setLastFailed({ pcm, ts: startedAt });
     sounds.play('error');
     logError(
       `Transcription failed: ${entry.error}${entry.audioFile ? `\n  Audio saved to ${entry.audioFile}` : ''}` +
         '\n  Use "Retry last failed" in the tray menu to try again.',
     );
+    notifyError('Transcription failed', `${entry.error}\nUse "Retry last failed" in the tray menu to try again.`);
     return;
   }
   if (retry) setLastFailed(null);
 
   if (!raw) {
     log('Discarded: the transcript is empty.');
-    history.append(entry);
+    record(entry);
     sounds.play('cancel');
     return;
   }
 
-  // Polish (falls back to the raw transcript on any failure).
+  // Translate, or polish (short transcripts skip polish). Falls back to the raw transcript on any failure.
   let text = raw;
-  if (polisher) {
+  const words = countWords(raw);
+  const skipPolish = !translator && config.polish.minWords > 0 && words < config.polish.minWords;
+  const llm = translator ?? (skipPolish ? null : polisher);
+  if (skipPolish && polisher) entry.polishSkipped = words;
+  if (llm) {
     const t1 = performance.now();
-    entry.polish = { model: polisher.model, ms: 0, inputTokens: 0, outputTokens: 0 };
+    entry.polish = { model: llm.model, ms: 0, inputTokens: 0, outputTokens: 0 };
     try {
-      const result = await polisher.polish(raw, AbortSignal.timeout(config.polish.timeoutMs));
+      const result = await llm.polish(raw, AbortSignal.timeout(llm.timeoutMs));
       text = result.text;
       entry.polish.inputTokens = result.inputTokens;
       entry.polish.outputTokens = result.outputTokens;
-      entry.costUsd.polish = llmCost(polisher.model, result.inputTokens, result.outputTokens);
+      entry.costUsd.polish = llmCost(llm.model, result.inputTokens, result.outputTokens);
     } catch (error) {
       entry.polish.error = (error as Error).message;
       logError(`${entry.polish.error}\n  Using the raw transcript.`);
+      if (translator) notifyError('Translation failed', `${entry.polish.error}\nThe untranslated text was pasted.`);
     }
     entry.polish.ms = Math.round(performance.now() - t1);
   }
@@ -407,11 +485,12 @@ async function processDictation(pcm: Int16Array, retry = false): Promise<void> {
   } catch (error) {
     sounds.play('error');
     logError('Could not copy/paste the text:', (error as Error).message);
+    notifyError('Could not paste', (error as Error).message);
   }
   finishEntry(entry, text);
 
   const action = retry ? 'Retry succeeded, copied to the clipboard' : entry.delivered === 'pasted' ? 'Pasted' : 'Copied';
-  log(`${action} (${timingSummary(entry, 'polish')})`);
+  log(`${action} (${timingSummary(entry, translator ? `translate to ${pair?.to}` : 'polish')})`);
   if (retry) sounds.play('added');
   if (text !== raw) console.log(`  raw:  ${raw}`);
   console.log(`  text: ${text}`);
@@ -435,9 +514,10 @@ async function processCommand(pcm: Int16Array): Promise<void> {
     const selection = await selectionPromise;
     await restoreClipboard(selection.previous);
     entry.error = (error as Error).message;
-    history.append(entry);
+    record(entry);
     sounds.play('error');
     logError(`Command: transcription failed: ${entry.error}`);
+    notifyError('Command failed', `Transcription failed: ${entry.error}`);
     return;
   }
   const selection = await selectionPromise;
@@ -446,7 +526,7 @@ async function processCommand(pcm: Int16Array): Promise<void> {
   if (!instruction) {
     await restoreClipboard(selection.previous);
     log('Command discarded: the instruction is empty.');
-    history.append(entry);
+    record(entry);
     sounds.play('cancel');
     return;
   }
@@ -465,9 +545,10 @@ async function processCommand(pcm: Int16Array): Promise<void> {
     entry.polish.error = (error as Error).message;
     entry.error = entry.polish.error;
     await restoreClipboard(selection.previous);
-    history.append(entry);
+    record(entry);
     sounds.play('error');
     logError(`${entry.error}\n  instruction: ${instruction}`);
+    notifyError('Command failed', entry.error);
     return;
   }
   entry.polish.ms = Math.round(performance.now() - t1);
@@ -479,6 +560,7 @@ async function processCommand(pcm: Int16Array): Promise<void> {
   } catch (error) {
     sounds.play('error');
     logError('Could not copy/paste the text:', (error as Error).message);
+    notifyError('Could not paste', (error as Error).message);
   }
   finishEntry(entry, text);
 
@@ -527,6 +609,7 @@ async function addWord(source: 'selection' | 'clipboard'): Promise<void> {
   } catch (error) {
     logError(`Could not add to the dictionary: ${(error as Error).message}`);
     sounds.play('error');
+    notifyError('Not added to the dictionary', (error as Error).message);
   }
 }
 
@@ -612,6 +695,7 @@ if (tray) {
   tray.on('retry-failed', () => retryFailed());
   tray.on('add-clipboard', () => enqueue(() => addWord('clipboard')));
   tray.on('toggle-pause', () => setPaused(!paused));
+  tray.on('translate', (index) => selectTranslation(index));
   tray.on('open-config', () => openConfig());
   tray.on('restart', () => void restart());
   tray.on('quit', () => void quit());
@@ -623,7 +707,13 @@ process.on('SIGTERM', () => void quit());
 hotkey.start();
 watchConfigFiles();
 
-const polishInfo = polisher ? `${config.polish.model} @ ${new URL(config.polish.baseUrl).host}` : 'disabled';
+const polishInfo = polisher
+  ? `${config.polish.model} @ ${new URL(config.polish.baseUrl).host}` +
+    (config.polish.minWords ? ` (skipped under ${config.polish.minWords} words)` : '')
+  : 'disabled';
+const pairInfo = translationPairs.length
+  ? `${translationPairs.map((p) => p.label).join(', ')} (currently: ${currentPair()?.label ?? 'off'})`
+  : 'none configured';
 const shortcuts = [
   `hold ${hotkey.label} to dictate${config.hotkey.handsFreeDoubleTap ? ' (double-tap: hands-free)' : ''}`,
   hotkey.commandLabel ? `hold ${hotkey.commandLabel} for a command (${initial.commandLlm.model})` : null,
@@ -635,6 +725,7 @@ console.log(`wisprcheap ready
   mic:        ${recorder.currentDeviceName()}${config.recording.device === 'default' ? ' (follows the Windows default)' : ''}
   transcribe: ${transcriber.provider} / ${transcriber.model} (language: ${config.transcription.language})
   polish:     ${polishInfo}
+  translate:  ${pairInfo}
   dictionary: ${dictionary.length} term(s)
   history:    ${config.history.enabled ? history.file : 'disabled'}
 ${tray ? 'Use the tray icon to show this log, pause, restart or quit.' : 'Press Ctrl+C to quit.'}`);

@@ -15,6 +15,7 @@
     "shortcut": "node --disable-warning=ExperimentalWarning scripts/create-shortcut.ts",
     "devices": "node --disable-warning=ExperimentalWarning src/devices.ts",
     "stats": "node --disable-warning=ExperimentalWarning src/stats.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\"",
     "test:smoke": "node --disable-warning=ExperimentalWarning scripts/smoke.ts",
     "test:e2e": "node --disable-warning=ExperimentalWarning scripts/e2e.ts",
     "typecheck": "tsc --noEmit"
