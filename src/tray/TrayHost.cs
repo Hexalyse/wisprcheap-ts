@@ -23,6 +23,13 @@ public static class WisprTray
     [DllImport("user32.dll")]
     static extern bool SetProcessDPIAware();
 
+    [DllImport("user32.dll")]
+    static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    const int SW_SHOWNORMAL = 1;
     const int MaxLines = 3000;
 
     static NotifyIcon notifyIcon;
@@ -295,7 +302,13 @@ public static class WisprTray
         }
         logForm.Show();
         if (logForm.WindowState == FormWindowState.Minimized) logForm.WindowState = FormWindowState.Normal;
-        logForm.Activate();
+        // The helper is started with windowsHide, so this process's startup show
+        // state is SW_HIDE. The first Form.Show() honors that and leaves the HWND
+        // hidden even though Form.Visible is true — the menu then says "Hide log"
+        // and the window is not on screen until it is hidden and shown again.
+        ShowWindow(logForm.Handle, SW_SHOWNORMAL);
+        logForm.BringToFront();
+        SetForegroundWindow(logForm.Handle);
         ScrollToEnd();
     }
 
