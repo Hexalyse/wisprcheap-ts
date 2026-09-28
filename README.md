@@ -77,6 +77,22 @@ Command mode and the add-word shortcut read the selection with a simulated **Ctr
 Two consequences: in a terminal with nothing selected, Ctrl+C interrupts the running program; and some editors
 (VS Code...) copy the whole current line when nothing is selected, which command mode then treats as the selection.
 
+### Command mode model
+
+By default, command mode uses the polish model (gpt-6-luna). Rewrites, tone changes and translations benefit from
+a stronger model, and since commands are occasional, it stays cheap. Recommended, following
+[OpenAI's model selection guide](https://developers.openai.com/api/docs/guides/model-selection)
+("Sol · Low: focused writing and editing"):
+
+```yaml
+command:
+  model: gpt-6-sol
+  reasoningEffort: low
+```
+
+Dictation keeps using the fast polish model, so its latency doesn't change. Any OpenAI-compatible provider works
+here too (`command.baseUrl` / `command.apiKey`).
+
 ## Costs
 
 List prices, September 2026. At about 140 words per minute, **10,000 words is about 70 minutes of audio**.
@@ -88,6 +104,16 @@ List prices, September 2026. At about 140 words per minute, **10,000 words is ab
 | Polish (default)              | gpt-6-luna ($0.10 / $0.50 per 1M tokens) | ~$0.02 |
 | Polish (alternatives)         | gpt-4.1-mini / gpt-5.4-mini    | ~$0.08 / ~$0.17  |
 | **Total (default)**           |                                | **~$0.34**       |
+
+Command mode is billed per command (transcription of the instruction, plus the LLM call on the selection):
+
+| Command model                 | Price (per 1M tokens)          | Per command      |
+| ----------------------------- | ------------------------------ | ---------------- |
+| gpt-6-luna (default)          | $0.10 / $0.50                  | ~$0.0002         |
+| gpt-6-sol, low (recommended)  | $2 / $10                       | ~$0.003-0.005    |
+
+Even 20 commands a day with gpt-6-sol is about $2-3 per month. These estimates assume a selection of a few sentences;
+longer selections cost proportionally more.
 
 `pnpm stats` shows your real numbers based on the history file.
 

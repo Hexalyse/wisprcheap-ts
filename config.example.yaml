@@ -68,7 +68,9 @@ dictionary:
     soundsLike: [p n p m, pee npm]
 
 # LLM for command mode. Every unset field uses the polish settings (same provider, key and model).
-# A stronger model can help for rewrites/translations, e.g. model: gpt-6-sol
+# Recommended for better rewrites and translations (~$0.003-0.005 per command, see README):
+#   model: gpt-6-sol
+#   reasoningEffort: low
 command:
   # model: gpt-6-luna
   # baseUrl: https://api.openai.com/v1
