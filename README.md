@@ -1,5 +1,10 @@
 # wisprcheap
 
+> [!IMPORTANT]
+> **This TypeScript version is archived and no longer maintained.** wisprcheap has been rewritten as a native
+> Rust app for **Windows and Linux**, with the same features: **[Hexalyse/wisprcheap](https://github.com/Hexalyse/wisprcheap)**.
+> It reads the same `config.yaml` and `.env`: copy them to `%APPDATA%\wisprcheap\` (or next to the executable) to switch.
+
 A minimal, pay-per-use take on Wispr Flow / Typeless for Windows:
 hold **Ctrl + Win**, speak, release. The audio is transcribed (ElevenLabs Scribe v2 or OpenAI),
 cleaned up by a cheap LLM ("polish" pass), copied to the clipboard and pasted into the focused text field.
