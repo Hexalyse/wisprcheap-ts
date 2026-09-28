@@ -1,0 +1,3 @@
+# uiohook-napi ships prebuilt Windows binaries, so its node-gyp build script is not needed.
+allowBuilds:
+  uiohook-napi: false

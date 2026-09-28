@@ -1,0 +1,77 @@
+# wisprcheap configuration. Copy to config.yaml and edit.
+# Every setting is optional; the values shown are the defaults.
+# Strings can reference environment variables with ${NAME}. A .env file next to this file is loaded automatically.
+
+hotkey:
+  # All keys must be held. Ctrl / Shift / Alt / Win match left or right; use CtrlRight, AltLeft, F13... for a specific key.
+  keys: [Ctrl, Win]
+  # Double-tap the hotkey to dictate hands-free, tap it once more to stop.
+  handsFreeDoubleTap: true
+  tapMaxMs: 250
+  doubleTapWindowMs: 350
+  # Pressing any other key while holding cancels the recording, so Ctrl+Win+Left/Right/D still work normally.
+  cancelOnOtherKey: true
+  # Taps F24 while Win is held so releasing Win doesn't open the Start menu.
+  suppressStartMenu: true
+
+recording:
+  device: default          # "default", an index or part of a name (see `pnpm devices`)
+  minDurationMs: 300
+  tailMs: 150              # keep recording briefly after release so the last word isn't clipped
+  maxDurationSec: 600
+  silenceThresholdDb: -55  # skip API calls when nothing louder than this was recorded
+
+transcription:
+  provider: elevenlabs     # elevenlabs | openai
+  language: auto           # auto, or an ISO code such as en / fr to force one language
+  timeoutMs: 30000
+  elevenlabs:
+    apiKey: ${ELEVENLABS_API_KEY}
+    model: scribe_v2
+    keyterms: true         # send the dictionary as keyterms (+$0.05 per audio hour)
+    noVerbatim: false      # let Scribe itself remove filler words and false starts
+  openai:
+    apiKey: ${OPENAI_API_KEY}
+    baseUrl: https://api.openai.com/v1
+    model: gpt-4o-transcribe   # or gpt-4o-mini-transcribe, gpt-transcribe
+    prompt: ""                 # optional context; dictionary terms are appended automatically
+
+polish:
+  enabled: true
+  # Any OpenAI-compatible Chat Completions endpoint works, e.g.
+  #   Groq:       https://api.groq.com/openai/v1
+  #   OpenRouter: https://openrouter.ai/api/v1
+  #   Gemini:     https://generativelanguage.googleapis.com/v1beta/openai
+  #   Ollama:     http://localhost:11434/v1
+  apiKey: ${OPENAI_API_KEY}
+  baseUrl: https://api.openai.com/v1
+  model: gpt-6-luna
+  reasoningEffort: none    # set to null for models without reasoning_effort (gpt-4.1-mini, most non-OpenAI models)
+  temperature: null
+  timeoutMs: 10000         # on timeout or error the raw transcript is pasted
+  instructions: |
+    Remove filler words, repeated starts, and abandoned phrases. When I correct myself, keep the final version.
+    Fix punctuation and capitalization. Preserve my meaning, wording, names, and numbers.
+
+# Names and technical terms. Sent to Scribe as keyterms (or to OpenAI as a prompt) and to the polish model.
+# soundsLike only helps the polish model fix known mishearings.
+dictionary:
+  - Kubernetes
+  - TypeScript
+  - term: pnpm
+    soundsLike: [p n p m, pee npm]
+
+output:
+  paste: true              # simulate Ctrl+V into the focused app (the text is always copied to the clipboard)
+  restoreClipboard: false  # true = put the previous clipboard content back after pasting
+  trailingSpace: true      # so consecutive dictations don't run together
+
+sounds:
+  enabled: true
+  volume: 0.25
+
+history:
+  enabled: true
+  path: history.jsonl      # relative to this file
+  saveFailedAudio: true    # keep the WAV when transcription fails
+  failedAudioDir: recordings
