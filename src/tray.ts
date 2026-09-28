@@ -5,12 +5,23 @@ import { createInterface } from 'node:readline';
 
 export type TrayState = 'idle' | 'recording' | 'processing' | 'paused';
 
-const ACTIONS = ['ready', 'copy-last', 'toggle-pause', 'open-config', 'restart', 'quit'] as const;
+const ACTIONS = [
+  'ready',
+  'copy-last',
+  'retry-failed',
+  'add-clipboard',
+  'toggle-pause',
+  'open-config',
+  'restart',
+  'quit',
+] as const;
 type Action = (typeof ACTIONS)[number];
 
 export interface TrayEvents {
   ready: [];
   'copy-last': [];
+  'retry-failed': [];
+  'add-clipboard': [];
   'toggle-pause': [];
   'open-config': [];
   restart: [];
@@ -70,6 +81,10 @@ export class Tray extends EventEmitter<TrayEvents> {
 
   setLastAvailable(available: boolean): void {
     this.#send(`last ${available ? 1 : 0}`);
+  }
+
+  setFailedAvailable(available: boolean): void {
+    this.#send(`failed ${available ? 1 : 0}`);
   }
 
   setPaused(paused: boolean): void {

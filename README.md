@@ -5,12 +5,16 @@ hold **Ctrl + Win**, speak, release. The audio is transcribed (ElevenLabs Scribe
 cleaned up by a cheap LLM ("polish" pass), copied to the clipboard and pasted into the focused text field.
 
 - Push-to-talk, or **double-tap** the hotkey for hands-free mode (tap again to stop)
-- Dictionary of names and technical terms: sent to Scribe as `keyterms` (or to OpenAI as a `prompt`) and to the polish model
+- **Command mode** (Ctrl + Win + Alt): select text and say "make this more formal", "translate to English"...,
+  or say "write a short reply saying I'll be late" with nothing selected
+- Dictionary of names and technical terms: sent to Scribe as `keyterms` (or to OpenAI as a `prompt`) and to the polish model.
+  Add a word by selecting it and pressing **Ctrl + Win + Shift**
 - Automatic language detection, and the polish pass never translates
-- Short sound cues for start, stop, hands-free, cancel and error
+- Short sound cues for start, stop, hands-free, command, cancel and error
 - `history.jsonl` log with raw and polished text, timings and estimated cost, plus `pnpm stats`
-- Runs in the background with a tray icon: status color, log window, pause, copy last dictation, open config, restart, quit
-- No settings UI: one YAML file
+- Runs in the background with a tray icon: status color, log window, pause, copy last dictation, retry a failed one...
+- Follows the default microphone (plug in a headset, it's used from the next dictation)
+- No settings UI: one YAML file, applied as soon as you save it
 
 ## Setup
 
@@ -44,8 +48,12 @@ The icon color shows the state: **grey** ready, **red** recording, **amber** tra
 
 - **Left-click** (or "Show log") toggles the log window. Closing it, or pressing Esc, only hides it; the app keeps running.
 - **Copy last dictation** puts the last polished text back on the clipboard.
-- **Pause dictation** ignores the hotkey until you resume.
-- **Open config.yaml** opens it in your default editor, then **Restart** applies the changes.
+- **Retry last failed** re-sends the last recording whose transcription failed (e.g. network or quota error).
+  The result goes to the clipboard, since focus is on the tray at that moment.
+- **Add clipboard to dictionary** adds the copied word or phrase to `config.yaml`.
+- **Pause dictation** ignores the shortcuts until you resume.
+- **Open config.yaml** opens it in your default editor. Saved changes apply immediately.
+- **Restart** fully restarts the app (not needed for config changes).
 - **Quit** waits for a dictation in progress to finish, then exits.
 
 ## How it behaves
@@ -54,12 +62,20 @@ The icon color shows the state: **grey** ready, **red** recording, **amber** tra
 | ---------------------------------------- | -------------------------------------------------------------- |
 | Hold Ctrl+Win, talk, release             | Rising beep, records, falling beep, pastes the result about 1-2 s later |
 | Tap Ctrl+Win twice quickly               | Triple beep: hands-free recording. Press Ctrl+Win again to finish |
+| Select text, hold Ctrl+Win+Alt, say an instruction, release | The selection is replaced by the rewritten text |
+| Same with nothing selected               | The requested text is written at the cursor                    |
+| Press Alt while dictating with Ctrl+Win  | Switches that recording to command mode (quick rising arpeggio) |
+| Select a word, press Ctrl+Win+Shift      | Adds it to the dictionary (two high beeps; a low beep if it was already there) |
 | Ctrl+Win + another key (Left, D...)      | The recording is cancelled and the Windows shortcut works as usual |
 | A single short tap                       | Low beep, nothing is sent                                      |
-| Transcription fails                      | Error buzz. The audio is kept in `recordings/`                 |
+| Transcription fails                      | Error buzz. The audio is kept in `recordings/` and can be retried from the tray |
 | Polish fails or times out                | The raw transcript is pasted instead                           |
 
 Pasting waits until you've released the hotkey, so Win+V (clipboard history) is never triggered by accident.
+
+Command mode and the add-word shortcut read the selection with a simulated **Ctrl+C** after you release the keys.
+Two consequences: in a terminal with nothing selected, Ctrl+C interrupts the running program; and some editors
+(VS Code...) copy the whole current line when nothing is selected, which command mode then treats as the selection.
 
 ## Costs
 
@@ -86,8 +102,10 @@ List prices, September 2026. At about 140 words per minute, **10,000 words is ab
 - The tray is a small C# program (`src/tray/`) compiled at startup by the built-in Windows PowerShell 5.1, so it needs no extra dependency.
   If it can't start, dictation keeps working and the reason is written to the log.
 - The desktop shortcut runs `scripts/launch-hidden.wsf` through `wscript.exe` so that no console window appears.
-- `pnpm test:smoke` checks sounds, the microphone and the hotkey state machine (using injected F13/F14/F15 keys).
-  `pnpm test:e2e` runs the whole pipeline against a local mock API.
+- `pnpm test:smoke` checks sounds, the microphone and the hotkey state machine, including command mode and add-word
+  (using injected F13-F17 keys, which have no Windows shortcuts).
+  `pnpm test:e2e` runs the whole app against a local mock API: dictation, retry, command mode, adding a word and config reload.
+  It never sends Ctrl+C / Ctrl+V (`WISPRCHEAP_NO_INJECT=1`), so it can't touch the window you're working in.
 
 ## License
 

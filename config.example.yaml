@@ -1,10 +1,17 @@
 # wisprcheap configuration. Copy to config.yaml and edit.
 # Every setting is optional; the values shown are the defaults.
 # Strings can reference environment variables with ${NAME}. A .env file next to this file is loaded automatically.
+# Changes are applied as soon as you save this file (or .env); no restart needed.
 
 hotkey:
-  # All keys must be held. Ctrl / Shift / Alt / Win match left or right; use CtrlRight, AltLeft, F13... for a specific key.
+  # Hold to dictate. All keys must be held. Ctrl / Shift / Alt / Win match left or right;
+  # use CtrlRight, AltLeft, F13... for a specific key.
   keys: [Ctrl, Win]
+  # Hold to speak an instruction: it rewrites the selected text ("make this more formal", "translate to English"),
+  # or writes new text at the cursor when nothing is selected. Pressing Alt during a dictation switches to it. [] disables.
+  commandKeys: [Ctrl, Win, Alt]
+  # Press to add the selected word to the dictionary below. [] disables.
+  addWordKeys: [Ctrl, Win, Shift]
   # Double-tap the hotkey to dictate hands-free, tap it once more to stop.
   handsFreeDoubleTap: true
   tapMaxMs: 250
@@ -13,7 +20,7 @@ hotkey:
   cancelOnOtherKey: true
 
 recording:
-  device: default          # "default", an index or part of a name (see `pnpm devices`)
+  device: default          # "default" follows the Windows default mic; or an index / part of a name (see `pnpm devices`)
   minDurationMs: 300
   tailMs: 150              # keep recording briefly after release so the last word isn't clipped
   maxDurationSec: 600
@@ -53,11 +60,21 @@ polish:
 
 # Names and technical terms. Sent to Scribe as keyterms (or to OpenAI as a prompt) and to the polish model.
 # soundsLike only helps the polish model fix known mishearings.
+# Add words quickly with the addWordKeys shortcut (selected text) or "Add clipboard to dictionary" in the tray.
 dictionary:
   - Kubernetes
   - TypeScript
   - term: pnpm
     soundsLike: [p n p m, pee npm]
+
+# LLM for command mode. Every unset field uses the polish settings (same provider, key and model).
+# A stronger model can help for rewrites/translations, e.g. model: gpt-6-sol
+command:
+  # model: gpt-6-luna
+  # baseUrl: https://api.openai.com/v1
+  # apiKey: ${OPENAI_API_KEY}
+  # reasoningEffort: none
+  timeoutMs: 30000
 
 output:
   paste: true              # simulate Ctrl+V into the focused app (the text is always copied to the clipboard)

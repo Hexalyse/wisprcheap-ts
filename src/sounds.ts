@@ -10,6 +10,10 @@ const CUES = {
   start: [[587, 55], [880, 75]],
   stop: [[880, 55], [587, 75]],
   lock: [[880, 45], [0, 25], [880, 45], [0, 25], [1175, 70]],
+  /** Switched to command mode during the hold. */
+  command: [[659, 50], [988, 50], [1319, 80]],
+  /** A word was added to the dictionary. */
+  added: [[1047, 60], [0, 30], [1568, 90]],
   cancel: [[440, 80]],
   error: [[233, 140], [0, 60], [175, 220]],
 } satisfies Record<string, Note[]>;
@@ -39,6 +43,7 @@ export class Sounds {
   #buffers = new Map<Cue, Int16Array>();
   #speaker: PvSpeaker | null = null;
   #stopTimer: NodeJS.Timeout | undefined;
+  #devices = '';
 
   constructor(opts: Config['sounds']) {
     this.#enabled = opts.enabled && opts.volume > 0;
@@ -46,7 +51,18 @@ export class Sounds {
       this.#buffers.set(cue, synth(notes, opts.volume));
     }
     // Creating the speaker takes ~130 ms (blocking), so do it once up front. start() is ~10 ms.
-    if (this.#enabled) this.#speaker = this.#create();
+    if (this.#enabled) {
+      this.#devices = this.#deviceList();
+      this.#speaker = this.#create();
+    }
+  }
+
+  #deviceList(): string {
+    try {
+      return PvSpeaker.getAvailableDevices().join('\n');
+    } catch {
+      return '';
+    }
   }
 
   #create(): PvSpeaker | null {
@@ -62,6 +78,12 @@ export class Sounds {
   play(cue: Cue): void {
     const pcm = this.#buffers.get(cue);
     if (!this.#enabled || !pcm) return;
+    // The speaker is bound to the default output when created: re-create it when devices change (~4 ms check).
+    const devices = this.#deviceList();
+    if (devices !== this.#devices) {
+      this.#devices = devices;
+      this.#dispose();
+    }
     this.#speaker ??= this.#create();
     const speaker = this.#speaker;
     if (!speaker) return;

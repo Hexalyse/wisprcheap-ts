@@ -1,4 +1,5 @@
 import type { Config, DictionaryEntry } from './config.ts';
+import { chatComplete } from './llm.ts';
 
 export interface PolishResult {
   text: string;
@@ -23,17 +24,22 @@ Always, whatever the directive says:
 - Return only the cleaned text: no preamble, no commentary, no quotes, no tags, no code fences.`,
   ];
 
-  if (dictionary.length) {
-    const lines = dictionary.map(({ term, soundsLike }) =>
-      soundsLike.length ? `- ${term} (may be transcribed as: ${soundsLike.join(', ')})` : `- ${term}`,
-    );
-    parts.push(`<dictionary>
-These are names and technical terms the speaker uses. Always use these exact spellings, and replace obvious mishearings with them:
-${lines.join('\n')}
-</dictionary>`);
-  }
+  const block = dictionaryBlock(dictionary);
+  if (block) parts.push(block);
 
   return parts.join('\n\n');
+}
+
+/** Dictionary section shared by the polish and command prompts ('' when the dictionary is empty). */
+export function dictionaryBlock(dictionary: DictionaryEntry[]): string {
+  if (!dictionary.length) return '';
+  const lines = dictionary.map(({ term, soundsLike }) =>
+    soundsLike.length ? `- ${term} (may be transcribed as: ${soundsLike.join(', ')})` : `- ${term}`,
+  );
+  return `<dictionary>
+These are names and technical terms the speaker uses. Always use these exact spellings, and replace obvious mishearings with them:
+${lines.join('\n')}
+</dictionary>`;
 }
 
 function stripArtifacts(text: string): string {
@@ -55,36 +61,8 @@ export class Polisher {
   }
 
   async polish(raw: string, signal: AbortSignal): Promise<PolishResult> {
-    const c = this.#config;
-    const body: Record<string, unknown> = {
-      model: c.model,
-      messages: [
-        { role: 'system', content: this.#systemPrompt },
-        { role: 'user', content: `<transcript>\n${raw}\n</transcript>` },
-      ],
-      stream: false,
-    };
-    if (c.reasoningEffort) body.reasoning_effort = c.reasoningEffort;
-    if (c.temperature !== null) body.temperature = c.temperature;
-
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (c.apiKey) headers.Authorization = `Bearer ${c.apiKey}`;
-
-    const res = await fetch(`${c.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Polish: HTTP ${res.status} ${res.statusText}${text ? `: ${text.slice(0, 500)}` : ''}`);
-    }
-    const json = (await res.json()) as {
-      choices?: { message?: { content?: string | null } }[];
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
-    };
-    const text = stripArtifacts(json.choices?.[0]?.message?.content ?? '');
+    const result = await chatComplete(this.#config, this.#systemPrompt, `<transcript>\n${raw}\n</transcript>`, signal, 'Polish');
+    const text = stripArtifacts(result.text);
     if (!text) throw new Error('Polish: empty response');
 
     // Cleanup never makes text much longer. If it did, the model probably answered the transcript.
@@ -92,10 +70,6 @@ export class Polisher {
       throw new Error('Polish: output much longer than the transcript (model likely answered it), using raw text');
     }
 
-    return {
-      text,
-      inputTokens: json.usage?.prompt_tokens ?? 0,
-      outputTokens: json.usage?.completion_tokens ?? 0,
-    };
+    return { ...result, text };
   }
 }

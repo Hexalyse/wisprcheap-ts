@@ -4,6 +4,12 @@ import { encodeWav } from './audio.ts';
 
 export interface HistoryEntry {
   ts: string;
+  /** Absent for dictations (older entries). */
+  mode?: 'command';
+  /** Command mode: the text that was selected when the command was spoken. */
+  selection?: string | null;
+  /** True when this entry is a retry of a failed recording. */
+  retry?: boolean;
   durationSec: number;
   transcription: { provider: string; model: string; ms: number; keyterms: number };
   polish: { model: string; ms: number; inputTokens: number; outputTokens: number; error?: string } | null;

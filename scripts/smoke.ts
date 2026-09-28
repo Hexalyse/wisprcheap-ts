@@ -16,67 +16,96 @@ for (const cue of ['start', 'stop', 'lock', 'cancel', 'error'] as const) {
   await sleep(500);
 }
 
-// 2. Recorder
-const rec = new Recorder(-1);
+// 2. Recorder (a new microphone handle per recording)
+const rec = new Recorder('default');
 let t = performance.now();
 rec.start();
-console.log(`recorder.start(): ${(performance.now() - t).toFixed(1)} ms on ${rec.deviceName}`);
+console.log(`recorder.start(): ${(performance.now() - t).toFixed(1)} ms on ${rec.currentDeviceName()}`);
 await sleep(1500);
 t = performance.now();
 const pcm = await rec.stop();
 console.log(`recorder.stop(): ${(performance.now() - t).toFixed(1)} ms, got ${pcmDurationMs(pcm).toFixed(0)} ms audio, peak ${loudestWindowDb(pcm).toFixed(1)} dBFS`);
+t = performance.now();
 rec.start();
+const restartMs = performance.now() - t;
 await sleep(300);
 const pcm2 = await rec.stop();
-console.log(`second recording: ${pcmDurationMs(pcm2).toFixed(0)} ms`);
+console.log(`second recording: start ${restartMs.toFixed(1)} ms, ${pcmDurationMs(pcm2).toFixed(0)} ms audio`);
 rec.release();
 
-// 3. Hotkey state machine with injected F13 + F14 (harmless keys)
+// 3. Hotkey state machine with injected F13-F17 (harmless keys):
+//    dictation F13+F14, command F13+F14+F16 (stands in for Alt), add word F13+F14+F17 (for Shift), F15 = other key
 const ptt = new PushToTalk({
   keys: ['F13', 'F14'],
+  commandKeys: ['F13', 'F14', 'F16'],
+  addWordKeys: ['F13', 'F14', 'F17'],
   handsFreeDoubleTap: true,
   tapMaxMs: 250,
   doubleTapWindowMs: 350,
   cancelOnOtherKey: true,
 });
 const events: string[] = [];
-ptt.on('start', () => events.push('start'));
-ptt.on('stop', () => events.push('stop'));
+ptt.on('start', (mode) => events.push(`start:${mode}`));
+ptt.on('mode', (mode) => events.push(`mode:${mode}`));
+ptt.on('stop', (mode) => events.push(`stop:${mode}`));
 ptt.on('lock', () => events.push('lock'));
 ptt.on('cancel', (r) => events.push(`cancel:${r}`));
+ptt.on('add-word', () => events.push('add-word'));
 ptt.start();
 await sleep(200);
 
 const down = async (...keys: number[]) => { for (const k of keys) { uIOhook.keyToggle(k, 'down'); await sleep(15); } };
 const up = async (...keys: number[]) => { for (const k of keys) { uIOhook.keyToggle(k, 'up'); await sleep(15); } };
+let failures = 0;
 const expect = async (label: string, expected: string[]) => {
   await sleep(100);
   const ok = JSON.stringify(events) === JSON.stringify(expected);
+  if (!ok) failures++;
   console.log(`${ok ? 'PASS' : 'FAIL'} ${label}: ${JSON.stringify(events)}${ok ? '' : ` (expected ${JSON.stringify(expected)})`}`);
   events.length = 0;
 };
+const { F13, F14, F15, F16, F17 } = UiohookKey;
 
-// hold -> release
-await down(UiohookKey.F13, UiohookKey.F14); await sleep(600); await up(UiohookKey.F14, UiohookKey.F13);
-await expect('hold & release', ['start', 'stop']);
+await down(F13, F14); await sleep(600); await up(F14, F13);
+await expect('hold & release', ['start:dictation', 'stop:dictation']);
 
-// single quick tap -> cancelled after the double-tap window
-await down(UiohookKey.F13, UiohookKey.F14); await up(UiohookKey.F14, UiohookKey.F13); await sleep(500);
-await expect('single tap', ['start', 'cancel:tap']);
+await down(F13, F14); await up(F14, F13); await sleep(500);
+await expect('single tap', ['start:dictation', 'cancel:tap']);
 
-// double tap -> hands-free, then tap to stop
-await down(UiohookKey.F13, UiohookKey.F14); await up(UiohookKey.F14, UiohookKey.F13); await sleep(80);
-await down(UiohookKey.F13, UiohookKey.F14); await up(UiohookKey.F14, UiohookKey.F13); await sleep(800);
-await down(UiohookKey.F13, UiohookKey.F14); await up(UiohookKey.F14, UiohookKey.F13);
-await expect('double tap hands-free', ['start', 'lock', 'stop']);
+await down(F13, F14); await up(F14, F13); await sleep(80);
+await down(F13, F14); await up(F14, F13); await sleep(800);
+await down(F13, F14); await up(F14, F13);
+await expect('double tap hands-free', ['start:dictation', 'lock', 'stop:dictation']);
 
-// other key while holding -> cancel
-await down(UiohookKey.F13, UiohookKey.F14); await sleep(300); await down(UiohookKey.F15); await up(UiohookKey.F15); await up(UiohookKey.F14, UiohookKey.F13);
-await expect('other key cancels', ['start', 'cancel:other-key']);
+await down(F13, F14); await sleep(300); await down(F15); await up(F15); await up(F14, F13);
+await expect('other key cancels', ['start:dictation', 'cancel:other-key']);
 
-// only one key of the combo -> nothing
-await down(UiohookKey.F13); await sleep(300); await up(UiohookKey.F13);
+await down(F13); await sleep(300); await up(F13);
 await expect('partial combo', []);
 
+await down(F16, F13, F14); await sleep(400); await up(F14, F13, F16);
+await expect('command combo pressed directly', ['start:command', 'stop:command']);
+
+await down(F13, F14); await sleep(300); await down(F16); await sleep(300); await up(F16); await sleep(300); await up(F14, F13);
+await expect('dictation upgraded to command (released the extra key first)', ['start:dictation', 'mode:command', 'stop:command']);
+
+await down(F16, F13, F14); await up(F14, F13, F16); await sleep(500);
+await expect('quick command tap is not a double-tap', ['start:command', 'stop:command']);
+
+await down(F13, F14); await sleep(200); await down(F17); await sleep(200); await up(F17, F14, F13);
+await expect('add word after the dictation keys', ['start:dictation', 'cancel:forced', 'add-word']);
+
+await down(F17, F13, F14); await sleep(200); await up(F14, F13, F17);
+await expect('add word pressed directly', ['add-word']);
+
+await down(F13, F14); await sleep(400); await up(F14, F13);
+await expect('dictation works again after add word', ['start:dictation', 'stop:dictation']);
+
+ptt.setEnabled(false);
+await down(F13, F14); await sleep(400); await up(F14, F13);
+await down(F17, F13, F14); await up(F14, F13, F17);
+await expect('paused: nothing fires', []);
+ptt.setEnabled(true);
+
 ptt.stop();
-process.exit(0);
+process.exit(failures ? 1 : 0);

@@ -35,29 +35,45 @@ function resolveKey(name: string): number[] {
   return [entry[1]];
 }
 
-type State = 'idle' | 'holding' | 'tapPending' | 'handsFree';
+/** Each entry is one key of the combo, as the set of codes that satisfy it (e.g. left or right Ctrl). */
+type Combo = ReadonlySet<number>[];
+
+function toCombo(keys: string[]): Combo | null {
+  return keys.length ? keys.map((k) => new Set(resolveKey(k))) : null;
+}
+
+export type Mode = 'dictation' | 'command';
+type State = 'idle' | 'holding' | 'tapPending' | 'handsFree' | 'suppressed';
 
 export interface PushToTalkEvents {
   /** Start recording. */
-  start: [];
+  start: [mode: Mode];
+  /** The recording switched mode while held (e.g. Alt pressed during Ctrl+Win: dictation -> command). */
+  mode: [mode: Mode];
   /** Stop recording and process it. */
-  stop: [];
+  stop: [mode: Mode];
   /** The recording switched to hands-free (double-tap). */
   lock: [];
   /** Discard the recording. */
   cancel: [reason: 'tap' | 'other-key' | 'forced'];
+  /** The add-word shortcut was pressed. */
+  'add-word': [];
 }
 
 /**
- * Hold the hotkey to record, release to stop.
- * Double-tap (short tap, then press again quickly) to record hands-free; press again to stop.
+ * Hold the dictation combo to record, release to stop; double-tap it for hands-free.
+ * Holding the command combo (which usually extends the dictation one, e.g. Ctrl+Win+Alt) records a command instead.
+ * The add-word combo fires once when pressed; a recording started by the shared keys is discarded.
  */
 export class PushToTalk extends EventEmitter<PushToTalkEvents> {
-  #opts: Config['hotkey'];
-  #groups: ReadonlySet<number>[];
-  #comboCodes: ReadonlySet<number>;
+  #opts!: Config['hotkey'];
+  #dictation!: Combo;
+  #command: Combo | null = null;
+  #addWord: Combo | null = null;
+  #allCodes: ReadonlySet<number> = new Set();
   #pressed = new Set<number>();
   #state: State = 'idle';
+  #mode: Mode = 'dictation';
   #pressedAt = 0;
   #tapTimer: NodeJS.Timeout | undefined;
   #ignoreOtherKeysUntil = 0;
@@ -65,13 +81,31 @@ export class PushToTalk extends EventEmitter<PushToTalkEvents> {
 
   constructor(opts: Config['hotkey']) {
     super();
+    this.configure(opts);
+  }
+
+  /** Apply new hotkey settings (config reload). Resets any hold in progress. */
+  configure(opts: Config['hotkey']): void {
     this.#opts = opts;
-    this.#groups = opts.keys.map((k) => new Set(resolveKey(k)));
-    this.#comboCodes = new Set(this.#groups.flatMap((g) => [...g]));
+    this.#dictation = toCombo(opts.keys) ?? [];
+    this.#command = toCombo(opts.commandKeys);
+    this.#addWord = toCombo(opts.addWordKeys);
+    this.#allCodes = new Set(
+      [this.#dictation, this.#command, this.#addWord].flatMap((combo) => (combo ?? []).flatMap((g) => [...g])),
+    );
+    this.reset();
   }
 
   get label(): string {
     return this.#opts.keys.join(' + ');
+  }
+
+  get commandLabel(): string | null {
+    return this.#command ? this.#opts.commandKeys.join(' + ') : null;
+  }
+
+  get addWordLabel(): string | null {
+    return this.#addWord ? this.#opts.addWordKeys.join(' + ') : null;
   }
 
   get state(): State {
@@ -88,9 +122,9 @@ export class PushToTalk extends EventEmitter<PushToTalkEvents> {
     uIOhook.stop();
   }
 
-  /** True while any key of the hotkey is physically held. */
+  /** True while any key used by one of the shortcuts is physically held. */
   isAnyHotkeyKeyDown(): boolean {
-    for (const code of this.#pressed) if (this.#comboCodes.has(code)) return true;
+    for (const code of this.#pressed) if (this.#allCodes.has(code)) return true;
     return false;
   }
 
@@ -116,16 +150,21 @@ export class PushToTalk extends EventEmitter<PushToTalkEvents> {
     if (!enabled) this.reset();
   }
 
-  #comboHeld(): boolean {
-    return this.#groups.every((group) => [...group].some((code) => this.#pressed.has(code)));
+  #held(combo: Combo | null): boolean {
+    return !!combo && combo.every((group) => [...group].some((code) => this.#pressed.has(code)));
+  }
+
+  #sessionHeld(): boolean {
+    return this.#held(this.#dictation) || this.#held(this.#command);
   }
 
   #onKeyDown(e: UiohookKeyboardEvent): void {
     if (this.#pressed.has(e.keycode)) return; // auto-repeat
-    const wasHeld = this.#comboHeld();
+    const wasSession = this.#sessionHeld();
+    const wasAddWord = this.#held(this.#addWord);
     this.#pressed.add(e.keycode);
 
-    if (!this.#comboCodes.has(e.keycode)) {
+    if (!this.#allCodes.has(e.keycode)) {
       const injected = Date.now() < this.#ignoreOtherKeysUntil;
       if (this.#opts.cancelOnOtherKey && !injected && (this.#state === 'holding' || this.#state === 'tapPending')) {
         clearTimeout(this.#tapTimer);
@@ -134,22 +173,43 @@ export class PushToTalk extends EventEmitter<PushToTalkEvents> {
       }
       return;
     }
-    if (!wasHeld && this.#comboHeld()) this.#onComboDown();
+    if (!this.#enabled || this.#state === 'suppressed') return;
+
+    if (!wasAddWord && this.#held(this.#addWord)) {
+      if (this.#state === 'holding' || this.#state === 'tapPending') {
+        clearTimeout(this.#tapTimer);
+        this.emit('cancel', 'forced');
+      }
+      this.#state = 'suppressed'; // ignore everything until all shortcut keys are released
+      this.emit('add-word');
+      return;
+    }
+
+    if (!wasSession && this.#sessionHeld()) {
+      this.#onComboDown();
+    } else if (this.#state === 'holding' && this.#mode === 'dictation' && this.#held(this.#command)) {
+      this.#mode = 'command';
+      this.emit('mode', 'command');
+    }
   }
 
   #onKeyUp(e: UiohookKeyboardEvent): void {
-    const wasHeld = this.#comboHeld();
+    const wasSession = this.#sessionHeld();
     this.#pressed.delete(e.keycode);
-    if (wasHeld && !this.#comboHeld()) this.#onComboUp();
+    if (this.#state === 'suppressed') {
+      if (!this.isAnyHotkeyKeyDown()) this.#state = 'idle';
+      return;
+    }
+    if (wasSession && !this.#sessionHeld()) this.#onComboUp();
   }
 
   #onComboDown(): void {
-    if (!this.#enabled) return;
     switch (this.#state) {
       case 'idle':
         this.#state = 'holding';
         this.#pressedAt = Date.now();
-        this.emit('start');
+        this.#mode = this.#held(this.#command) ? 'command' : 'dictation';
+        this.emit('start', this.#mode);
         break;
       case 'tapPending':
         clearTimeout(this.#tapTimer);
@@ -158,9 +218,9 @@ export class PushToTalk extends EventEmitter<PushToTalkEvents> {
         break;
       case 'handsFree':
         this.#state = 'idle';
-        this.emit('stop');
+        this.emit('stop', 'dictation');
         break;
-      case 'holding':
+      default:
         break;
     }
   }
@@ -168,7 +228,7 @@ export class PushToTalk extends EventEmitter<PushToTalkEvents> {
   #onComboUp(): void {
     if (this.#state !== 'holding') return;
     const heldMs = Date.now() - this.#pressedAt;
-    if (this.#opts.handsFreeDoubleTap && heldMs < this.#opts.tapMaxMs) {
+    if (this.#mode === 'dictation' && this.#opts.handsFreeDoubleTap && heldMs < this.#opts.tapMaxMs) {
       // Might be the first half of a double-tap: keep recording and wait for the second press.
       this.#state = 'tapPending';
       this.#tapTimer = setTimeout(() => {
@@ -179,6 +239,6 @@ export class PushToTalk extends EventEmitter<PushToTalkEvents> {
       return;
     }
     this.#state = 'idle';
-    this.emit('stop');
+    this.emit('stop', this.#mode);
   }
 }

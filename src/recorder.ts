@@ -18,18 +18,36 @@ export function resolveDeviceIndex(device: string | number): number {
   return index;
 }
 
+/**
+ * Opens the microphone for each recording (~20 ms) and closes it afterwards, so a headset that was
+ * plugged in or a new default device is picked up without restarting. It also keeps the mic
+ * (and the Windows "microphone in use" indicator) off between dictations.
+ */
 export class Recorder {
-  #recorder: PvRecorder;
+  #device: string | number;
+  #recorder: PvRecorder | null = null;
   #chunks: Int16Array[] = [];
   #loop: Promise<void> | null = null;
   #running = false;
+  #lastDeviceName: string | null = null;
 
-  constructor(deviceIndex: number) {
-    this.#recorder = new PvRecorder(FRAME_LENGTH, deviceIndex);
+  constructor(device: string | number) {
+    this.#device = device;
   }
 
-  get deviceName(): string {
-    return this.#recorder.getSelectedDevice();
+  /** Change the configured device (config reload). Applies from the next recording. */
+  setDevice(device: string | number): void {
+    this.#device = device;
+  }
+
+  /** Name of the device a recording would use right now. */
+  currentDeviceName(): string {
+    const recorder = new PvRecorder(FRAME_LENGTH, resolveDeviceIndex(this.#device));
+    try {
+      return recorder.getSelectedDevice();
+    } finally {
+      recorder.release();
+    }
   }
 
   get isRecording(): boolean {
@@ -38,16 +56,27 @@ export class Recorder {
 
   start(): void {
     if (this.#running) return;
+    const recorder = new PvRecorder(FRAME_LENGTH, resolveDeviceIndex(this.#device));
+    try {
+      recorder.start();
+    } catch (error) {
+      recorder.release();
+      throw error;
+    }
+    const name = recorder.getSelectedDevice();
+    if (this.#lastDeviceName !== null && name !== this.#lastDeviceName) console.log(`[recorder] Now using: ${name}`);
+    this.#lastDeviceName = name;
+
+    this.#recorder = recorder;
     this.#chunks = [];
-    this.#recorder.start();
     this.#running = true;
-    this.#loop = this.#readLoop();
+    this.#loop = this.#readLoop(recorder);
   }
 
-  async #readLoop(): Promise<void> {
+  async #readLoop(recorder: PvRecorder): Promise<void> {
     while (this.#running) {
       try {
-        const frame = await this.#recorder.read();
+        const frame = await recorder.read();
         this.#chunks.push(frame.slice());
       } catch (error) {
         if (this.#running) console.error('[recorder] read failed:', error);
@@ -62,19 +91,26 @@ export class Recorder {
     this.#running = false;
     await this.#loop;
     this.#loop = null;
-    this.#recorder.stop();
+    this.#close();
     const pcm = concatPcm(this.#chunks);
     this.#chunks = [];
     return pcm;
   }
 
+  #close(): void {
+    const recorder = this.#recorder;
+    this.#recorder = null;
+    if (!recorder) return;
+    try {
+      recorder.stop();
+    } catch {
+      // already stopped
+    }
+    recorder.release();
+  }
+
   release(): void {
     this.#running = false;
-    try {
-      this.#recorder.stop();
-    } catch {
-      // not started
-    }
-    this.#recorder.release();
+    this.#close();
   }
 }

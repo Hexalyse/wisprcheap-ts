@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { parseEnv } from 'node:util';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 
@@ -21,8 +22,12 @@ const dictionaryEntry = z.union([
 const schema = z.object({
   hotkey: z
     .object({
-      /** All keys must be held. Generic names (Ctrl, Shift, Alt, Win) match left or right. */
+      /** Hold to dictate. All keys must be held. Generic names (Ctrl, Shift, Alt, Win) match left or right. */
       keys: z.array(z.string()).min(1).default(['Ctrl', 'Win']),
+      /** Hold to speak an instruction that edits the selected text (or writes new text). [] disables it. */
+      commandKeys: z.array(z.string()).default(['Ctrl', 'Win', 'Alt']),
+      /** Press to add the selected text to the dictionary. [] disables it. */
+      addWordKeys: z.array(z.string()).default(['Ctrl', 'Win', 'Shift']),
       /** Double-tap the hotkey to record hands-free; tap once more to stop. */
       handsFreeDoubleTap: z.boolean().default(true),
       /** A press shorter than this counts as a "tap" (first half of a double-tap). */
@@ -94,6 +99,18 @@ const schema = z.object({
 
   dictionary: z.array(dictionaryEntry).nullable().default([]),
 
+  /** LLM used by command mode. Every unset field falls back to the polish settings. */
+  command: z
+    .object({
+      apiKey: z.string().optional(),
+      baseUrl: z.string().optional(),
+      model: z.string().optional(),
+      reasoningEffort: z.string().nullable().optional(),
+      temperature: z.number().min(0).max(2).nullable().optional(),
+      timeoutMs: z.number().int().positive().default(30_000),
+    })
+    .prefault({}),
+
   output: z
     .object({
       /** Simulate Ctrl+V into the focused app. If false, the text is only copied to the clipboard. */
@@ -127,11 +144,37 @@ const schema = z.object({
 export type Config = z.infer<typeof schema>;
 export type DictionaryEntry = { term: string; soundsLike: string[] };
 
+/** Connection settings for an OpenAI-compatible Chat Completions call. */
+export interface LlmOptions {
+  apiKey?: string;
+  baseUrl: string;
+  model: string;
+  reasoningEffort: string | null;
+  temperature: number | null;
+  timeoutMs: number;
+}
+
 export interface LoadedConfig {
   config: Config;
   configPath: string | null;
   baseDir: string;
   dictionary: DictionaryEntry[];
+  /** Command-mode LLM with the polish fallbacks applied. */
+  commandLlm: LlmOptions;
+}
+
+/** Values we set from .env files, so a reload can update them without overriding the real environment. */
+const envFromFiles = new Set<string>();
+
+function loadEnvFiles(files: string[]): void {
+  for (const file of files) {
+    if (!existsSync(file)) continue;
+    for (const [key, value] of Object.entries(parseEnv(readFileSync(file, 'utf8')))) {
+      if (process.env[key] !== undefined && !envFromFiles.has(key)) continue; // real environment wins
+      process.env[key] = value;
+      envFromFiles.add(key);
+    }
+  }
 }
 
 /** Replace `${VAR}` occurrences in every string of the parsed YAML. */
@@ -173,9 +216,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): LoadedConfig
   const configPath = resolveConfigPath(argv);
   const baseDir = configPath ? path.dirname(configPath) : PROJECT_ROOT;
 
-  for (const envFile of new Set([path.join(baseDir, '.env'), path.join(PROJECT_ROOT, '.env')])) {
-    if (existsSync(envFile)) process.loadEnvFile(envFile);
-  }
+  loadEnvFiles([...new Set([path.join(baseDir, '.env'), path.join(PROJECT_ROOT, '.env')])]);
 
   const raw = configPath ? (parseYaml(readFileSync(configPath, 'utf8')) ?? {}) : {};
   const result = schema.safeParse(interpolateEnv(raw));
@@ -201,6 +242,20 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): LoadedConfig
   if (config.polish.enabled && !config.polish.apiKey && !polishIsLocal) {
     problems.push('polish.apiKey is missing (or set OPENAI_API_KEY in .env), or set polish.enabled: false');
   }
+
+  const c = config.command;
+  const commandLlm: LlmOptions = {
+    apiKey: c.apiKey || config.polish.apiKey,
+    baseUrl: c.baseUrl ?? config.polish.baseUrl,
+    model: c.model ?? config.polish.model,
+    reasoningEffort: c.reasoningEffort === undefined ? config.polish.reasoningEffort : c.reasoningEffort,
+    temperature: c.temperature === undefined ? config.polish.temperature : c.temperature,
+    timeoutMs: c.timeoutMs,
+  };
+  const commandIsLocal = /localhost|127\.0\.0\.1/.test(commandLlm.baseUrl);
+  if (config.hotkey.commandKeys.length && !commandLlm.apiKey && !commandIsLocal) {
+    problems.push('command mode needs an API key (command.apiKey, polish.apiKey or OPENAI_API_KEY), or set hotkey.commandKeys: []');
+  }
   if (problems.length) throw new Error(`Config problems:\n  - ${problems.join('\n  - ')}`);
 
   const seen = new Set<string>();
@@ -213,5 +268,13 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): LoadedConfig
     dictionary.push(normalized);
   }
 
-  return { config, configPath, baseDir, dictionary };
+  return { config, configPath, baseDir, dictionary, commandLlm };
+}
+
+/** The config file to create/edit: the one in use, or the project's config.yaml (created from the example). */
+export function ensureConfigFile(configPath: string | null): string {
+  if (configPath) return configPath;
+  const file = path.join(PROJECT_ROOT, 'config.yaml');
+  if (!existsSync(file)) copyFileSync(path.join(PROJECT_ROOT, 'config.example.yaml'), file);
+  return file;
 }

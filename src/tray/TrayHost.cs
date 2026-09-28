@@ -2,8 +2,9 @@
 //
 // Protocol, one UTF-8 line per message:
 //   stdin  (from Node): "state <idle|recording|processing|paused>\t<text>", "log <line>",
-//                       "last <0|1>", "paused <0|1>", "show-log", "exit"
-//   stdout (to Node):   "ready", "copy-last", "toggle-pause", "open-config", "restart", "quit"
+//                       "last <0|1>", "failed <0|1>", "paused <0|1>", "show-log", "exit"
+//   stdout (to Node):   "ready", "copy-last", "retry-failed", "add-clipboard", "toggle-pause",
+//                       "open-config", "restart", "quit"
 // When stdin closes (Node died), the tray exits.
 
 using System;
@@ -23,7 +24,7 @@ public static class WisprTray
     const int MaxLines = 3000;
 
     static NotifyIcon notifyIcon;
-    static ToolStripMenuItem statusItem, logItem, copyItem, pauseItem;
+    static ToolStripMenuItem statusItem, logItem, copyItem, retryItem, pauseItem;
     static Form logForm;
     static TextBox logBox;
     static readonly List<string> lines = new List<string>();
@@ -62,13 +63,17 @@ public static class WisprTray
         logItem.Font = new Font(logItem.Font, FontStyle.Bold);
         copyItem = new ToolStripMenuItem("Copy last dictation", null, delegate { Send("copy-last"); });
         copyItem.Enabled = false;
+        retryItem = new ToolStripMenuItem("Retry last failed", null, delegate { Send("retry-failed"); });
+        retryItem.Enabled = false;
+        ToolStripMenuItem addItem = new ToolStripMenuItem("Add clipboard to dictionary", null, delegate { Send("add-clipboard"); });
         pauseItem = new ToolStripMenuItem("Pause dictation", null, delegate { Send("toggle-pause"); });
         ToolStripMenuItem configItem = new ToolStripMenuItem("Open config.yaml", null, delegate { Send("open-config"); });
-        ToolStripMenuItem restartItem = new ToolStripMenuItem("Restart (reload config)", null, delegate { Send("restart"); });
+        ToolStripMenuItem restartItem = new ToolStripMenuItem("Restart", null, delegate { Send("restart"); });
         ToolStripMenuItem quitItem = new ToolStripMenuItem("Quit", null, delegate { Send("quit"); });
         menu.Items.AddRange(new ToolStripItem[] {
             statusItem, new ToolStripSeparator(),
-            logItem, copyItem, pauseItem, new ToolStripSeparator(),
+            logItem, copyItem, retryItem, new ToolStripSeparator(),
+            addItem, pauseItem, new ToolStripSeparator(),
             configItem, restartItem, new ToolStripSeparator(),
             quitItem
         });
@@ -128,6 +133,7 @@ public static class WisprTray
             case "state": SetState(arg); break;
             case "log": AppendLog(arg); break;
             case "last": copyItem.Enabled = arg == "1"; break;
+            case "failed": retryItem.Enabled = arg == "1"; break;
             case "paused": pauseItem.Checked = arg == "1"; break;
             case "show-log": ShowLog(); break;
             case "exit": Exit(); break;
